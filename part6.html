@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC 6부 — GC 종류 핵심 정리</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav id="sidebar">
+  <a class="nav-home" href="index.html">← 목차로</a>
+  <div class="logo"><div class="tag">GC 6부</div><h1 style="font-family:var(--display);font-size:22px;color:#fff;margin-top:4px;">GC 종류 핵심 정리</h1></div>
+  <nav>
+<div class="nav-item active" onclick="goTo('s0')"><span class="num">00</span> 개요</div>
+<div class="nav-item" onclick="goTo('s1')"><span class="num">01</span> 전체 비교표</div>
+<div class="nav-item" onclick="goTo('s2')"><span class="num">02</span> Parallel vs Concurrent 정의</div>
+<div class="nav-item" onclick="goTo('s3')"><span class="num">03</span> Serial GC</div>
+<div class="nav-item" onclick="goTo('s4')"><span class="num">04</span> Parallel GC</div>
+<div class="nav-item" onclick="goTo('s5')"><span class="num">05</span> G1 GC</div>
+<div class="nav-item" onclick="goTo('s6')"><span class="num">06</span> ZGC</div>
+<div class="nav-item" onclick="goTo('s7')"><span class="num">07</span> CMS — 역사</div>
+<div class="nav-item" onclick="goTo('s8')"><span class="num">08</span> Shenandoah GC</div>
+<div class="nav-item" onclick="goTo('s9')"><span class="num">09</span> 진화의 큰 흐름</div>
+    <div class="nav-item" onclick="goTo('quiz')" style="margin-top:10px;border-top:1px solid var(--border);padding-top:14px;"><span class="num">🧪</span> 퀴즈 (20문제)</div>
+  </nav>
+</nav>
+<main id="main">
+<div class="section active" id="s0">
+  <div class="section-header"><div class="chip">GC 6부</div><h2>GC 종류 핵심 정리<br>(JDK 25 기준)</h2><p>처리량(Throughput) vs 지연시간(Latency) 트레이드오프가 Parallel ↔ ZGC 양 극단을 결정한다. G1은 그 사이의 균형.</p></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+    <div class="card" style="border-color:rgba(0,212,255,.3);"><h3>Serial / Parallel</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">STW 방식. Serial은 싱글코어용, Parallel은 배치·스루풋용</p></div>
+    <div class="card" style="border-color:rgba(16,185,129,.3);"><h3>G1 GC (디폴트)</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">JDK 9~25 서버 클래스 디폴트. Throughput과 Latency의 균형</p></div>
+    <div class="card" style="border-color:rgba(124,58,237,.3);"><h3>ZGC / Shenandoah</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">초저지연. ZGC는 1ms 미만 보장. 거의 100% Concurrent</p></div>
+  </div>
+</div>
+<div class="section" id="s1">
+  <div class="section-header"><div class="chip">Chapter 01</div><h2>전체 비교표</h2></div>
+  <div class="card"><h3>이 한 표가 6부의 본체</h3>
+    <table class="data-table"><thead><tr><th>GC</th><th>스레드</th><th>컨커런트</th><th>스루풋</th><th>STW</th><th>디폴트 JDK</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">Serial</td><td>싱글</td><td>X</td><td>낮음</td><td>매우 김</td><td>client class</td></tr>
+      <tr><td class="highlight">Parallel</td><td>멀티</td><td>X</td><td><strong style="color:var(--accent4);">최고</strong></td><td>김 (수십초)</td><td>JDK 5~8</td></tr>
+      <tr><td class="highlight">G1</td><td>멀티</td><td>O</td><td>높음</td><td>수십ms</td><td><strong style="color:var(--accent);">JDK 9~25</strong></td></tr>
+      <tr><td class="highlight">ZGC</td><td>멀티</td><td>O (100%)</td><td>살짝 손해</td><td><strong style="color:var(--accent3);">&lt;1ms 보장</strong></td><td>(옵션)</td></tr>
+      <tr><td style="color:var(--text-muted);">CMS</td><td>멀티</td><td>O (일부)</td><td>중간</td><td>폭발 가능</td><td><strong style="color:var(--danger);">JDK 14 제거</strong></td></tr>
+      <tr><td class="highlight">Shenandoah</td><td>멀티</td><td>O</td><td>양호</td><td>&lt;10ms</td><td>OpenJDK만</td></tr>
+    </tbody></table></div>
+</div>
+<div class="section" id="s2">
+  <div class="section-header"><div class="chip">Chapter 02</div><h2>Parallel vs Concurrent<br>— 중요 정의</h2></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;">
+    <div class="card" style="border-color:rgba(245,158,11,.25);"><h3 style="color:var(--accent4);">Parallel</h3>
+      <p style="font-size:13px;color:var(--text-dim);line-height:1.7;margin-bottom:10px;">GC 스레드 N개가 모두 GC만 수행 → 어플리케이션은 무조건 멈춤 (STW)</p>
+      <div class="code-block" style="font-size:10px;">[Parallel GC, 4코어]
+코어1: [GCGCGCGCGCGCGC]
+코어2: [GCGCGCGCGCGCGC] ← 전부 GC
+코어3: [GCGCGCGCGCGCGC] ← 앱은 0
+코어4: [GCGCGCGCGCGCGC]</div></div>
+    <div class="card" style="border-color:rgba(0,212,255,.25);"><h3 style="color:var(--accent);">Concurrent</h3>
+      <p style="font-size:13px;color:var(--text-dim);line-height:1.7;margin-bottom:10px;">GC 스레드가 도는 동안에도 일부 코어에서 어플리케이션 코드가 계속 실행</p>
+      <div class="code-block" style="font-size:10px;">[Concurrent GC (G1/ZGC), 4코어]
+코어1: [GC GC GC GC GC]
+코어2: [GC GC GC GC GC] ← 일부는 GC
+코어3: [APP APP APP APP] ← 일부는 앱
+코어4: [APP APP APP APP]</div></div>
+  </div>
+  <div class="info-box red"><strong>핵심:</strong> Parallel GC도 멀티 스레드지만 <strong>컨커런트는 아니다</strong>. Concurrent = GC 스레드가 여러 개라는 뜻이 아님.</div>
+</div>
+<div class="section" id="s3">
+  <div class="section-header"><div class="chip">Chapter 03</div><h2>Serial GC</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>핵심</h3>
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;">싱글 스레드로 동작 — 가장 최초의 GC 형태</div>
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;">Generational: Young(아래) + Old(위)</div>
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><strong>언제 쓰나:</strong> 싱글 코어 환경 / 힙 100MB 이하 소규모</div>
+    </div></div>
+  <div class="card" style="margin-bottom:16px;"><h3>컨테이너 환경의 함정 (면접 단골)</h3>
+    <table class="data-table"><thead><tr><th>호스트</th><th>Docker 옵션</th><th>결과</th></tr></thead>
+    <tbody>
+      <tr><td>16GB / 8코어</td><td class="code">--cpus=1 -m=1g</td><td class="highlight"><strong>client class → Serial GC 디폴트!</strong></td></tr>
+      <tr><td>16GB / 8코어</td><td>제한 없음</td><td>server class → G1 GC 디폴트</td></tr>
+    </tbody></table>
+    <div class="info-box yellow" style="margin-top:12px;margin-bottom:0;">컨테이너에서는 호스트 머신이 아닌 <strong>컨테이너의 CPU/메모리 크기가 기준</strong>. -XX:+UseG1GC 명시 필수.</div></div>
+</div>
+<div class="section" id="s4">
+  <div class="section-header"><div class="chip">Chapter 04</div><h2>Parallel GC<br>(Throughput Collector)</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>핵심 철학 — 스루풋 최우선</h3>
+    <div class="code-block">스루풋 = 어플리케이션 실행 시간 / 전체 실행 시간
+전체 20초 = 어플리케이션 19초 + GC 1초 → 스루풋 95%
+
+한 번 STW가 길어도 좋다. 전체 실행 시간을 줄이는 게 중요.</div>
+    <div class="info-box yellow" style="margin-bottom:0;">⚠️ <strong>단점</strong>: 힙 4GB 넘으면 STW가 수초~수십초까지 갈 수 있음. 배치 처리·데이터 처리 워크로드에 적합.</div></div>
+  <div class="card"><h3>디폴트 GC 역사</h3>
+    <table class="data-table"><thead><tr><th>JDK 버전</th><th>디폴트 (server class)</th></tr></thead>
+    <tbody>
+      <tr><td>5 ~ 8</td><td class="highlight">Parallel GC</td></tr>
+      <tr><td>9 ~ 25</td><td class="highlight">G1 GC</td></tr>
+    </tbody></table></div>
+</div>
+<div class="section" id="s5">
+  <div class="section-header"><div class="chip">Chapter 05</div><h2>G1 GC<br>(JDK 9~25 디폴트)</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Mostly Concurrent Collector</h3>
+    <div class="code-block">[G1 GC의 한 사이클]
+─STW─├─────CONCURRENT (앱과 동시)──────┤─STW─├──CONCURRENT──┤
+짧음     여기서 앱 코드도 함께 돌아간다    짧음</div>
+    <div class="info-box green" style="margin-bottom:0;">수십~수백ms 수준의 STW. 소규모(듀얼코어, 수GB)부터 대규모(32+코어, 수백GB)까지 광범위하게 커버 → 디폴트로 채택.</div></div>
+  <div class="card"><h3>특징</h3>
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><strong>높은 스루풋</strong> (Parallel만큼은 아니지만 충분히 높음)</div>
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><strong>높은 확률로 MaxPauseMillis 목표 준수</strong> — 500ms 지정 시 거의 안 넘김</div>
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;">Generational이지만 <strong>Region</strong>이라는 새 개념 도입 (G1 심화는 8부~12부에서)</div>
+    </div></div>
+</div>
+<div class="section" id="s6">
+  <div class="section-header"><div class="chip">Chapter 06</div><h2>ZGC<br>(Ultra-Low Latency)</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>핵심 — 굉장한 GC</h3>
+    <div class="info-box purple"><strong>힙 사이즈와 무관하게 1ms 미만의 STW를 보장한다.</strong><br>힙이 수백MB든 16TB든 — STW는 일관되게 1ms 미만. 최선이 아니라 보장.</div></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Generational ZGC 진화</h3>
+    <table class="data-table"><thead><tr><th>JDK</th><th>동작</th></tr></thead>
+    <tbody>
+      <tr><td>11</td><td>ZGC 실험적 도입 (논제너레이셔널)</td></tr>
+      <tr><td>15</td><td>ZGC production-ready</td></tr>
+      <tr><td>21</td><td><strong>Generational ZGC 등장</strong> (production-ready)</td></tr>
+      <tr><td>23</td><td><strong>Generational이 디폴트 모드</strong></td></tr>
+      <tr><td>24</td><td>논제너레이셔널 완전 제거</td></tr>
+      <tr><td class="highlight">25</td><td>Generational ZGC만 존재</td></tr>
+    </tbody></table></div>
+  <div class="info-box green">Generational ZGC가 비제너레이셔널보다 스루풋 10~20% 개선. 어떤 경우 G1보다도 스루풋이 잘 나온다. <span class="code">-XX:+UseZGC</span> 명시 필수 (아직 디폴트 아님).</div>
+</div>
+<div class="section" id="s7">
+  <div class="section-header"><div class="chip">Chapter 07</div><h2>CMS GC — 역사</h2><p>현재는 사용 불가 (JDK 14 완전 제거). 인터뷰·문서에서 만날 수 있어 알아둘 가치는 있음.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>왜 사라졌나 — Compact 단계의 부재</h3>
+    <div class="code-block">CMS Sweep 후의 힙 (Compact 없음):
+[●][gap][●][gap][●][gap][●][gap][●][...큰 free 공간...]
+
+Sweep만 하고 압축(Compact) 없음 → 단편화(Fragmentation) 발생
+작은 빈 슬롯들을 Free-list로 관리
+큰 객체 할당 요청 → Free-list 탐색 실패 → Full GC 발동
+Full GC는 싱글 스레드로 Compact 수행 → STW가 엄청 길어짐
+예측 불가능한 거대 STW → 운영 불가</div>
+    <div class="info-box red" style="margin-bottom:0;">"갑자기 Full GC 돌면서 STW가 수십초로 튀었다. SNS처럼 트래픽 몰리는 서비스에서는 장애로 직결."</div></div>
+  <div class="info-box" style="margin-bottom:0;">컨커런트 컬렉터의 바통: <strong>CMS → G1 → ZGC/Shenandoah</strong></div>
+</div>
+<div class="section" id="s8">
+  <div class="section-header"><div class="chip">Chapter 08</div><h2>Shenandoah GC</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>특징</h3>
+    <table class="data-table"><thead><tr><th>항목</th><th>내용</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">STW</td><td>10ms 미만 보장 (ZGC의 1ms보다는 살짝 손해)</td></tr>
+      <tr><td class="highlight">개발사</td><td>Red Hat</td></tr>
+      <tr><td class="highlight">Oracle JDK</td><td><strong style="color:var(--danger);">없음</strong> — Oracle은 ZGC를 밀고 Shenandoah를 일부러 빼버림</td></tr>
+      <tr><td class="highlight">OpenJDK</td><td>포함 (Adoptium, Amazon Corretto 등)</td></tr>
+      <tr><td class="highlight">Gen Shenandoah</td><td>JDK 25에서 production-ready 승격 (JEP 521, pause time 보통 1~5ms)</td></tr>
+    </tbody></table></div>
+  <div class="info-box">둘 다 사용 가능할 때는 <strong>Generational ZGC가 추천</strong>된다.</div>
+</div>
+<div class="section" id="s9">
+  <div class="section-header"><div class="chip">Chapter 09</div><h2>진화의 큰 흐름</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>GC 계보</h3>
+    <div class="code-block">[처리량 최우선]              [지연시간 최우선]
+Serial ────────► Parallel
+                    │
+                    │ (멀티코어 시대 도래)
+                    ▼
+              CMS ──► G1 ──► ZGC / Shenandoah
+            (제거됨)  (현재      (차세대)
+                     디폴트)
+              ↑컨커런트 컬렉터의 계보↑</div>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">하드웨어 발전이 GC 진화의 핵심 동인. 멀티코어가 없었으면 컨커런트 GC는 등장 불가능.</div></div>
+  <div class="card"><h3>JDK 25 사용 가능한 컬렉터</h3>
+    <table class="data-table"><thead><tr><th>컬렉터</th><th>사용 가능</th><th>옵션</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">Serial</td><td>O</td><td class="code">-XX:+UseSerialGC</td></tr>
+      <tr><td class="highlight">Parallel</td><td>O</td><td class="code">-XX:+UseParallelGC</td></tr>
+      <tr><td class="highlight">G1</td><td>O (디폴트)</td><td class="code">-XX:+UseG1GC</td></tr>
+      <tr><td class="highlight">ZGC</td><td>O</td><td class="code">-XX:+UseZGC</td></tr>
+      <tr><td style="color:var(--text-muted);">CMS</td><td style="color:var(--danger);">X (JDK 14 제거)</td><td>—</td></tr>
+      <tr><td class="highlight">Shenandoah</td><td>OpenJDK만</td><td class="code">-XX:+UseShenandoahGC</td></tr>
+    </tbody></table></div>
+</div>
+<div id="quiz-section" style="display:none;">
+  <div class="section-header"><div class="chip">퀴즈</div><h2>실력 확인 — 20문제</h2><p>6부 핵심 개념 점검.</p></div>
+  <div id="quizMain">
+    <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="qProgressFill" style="width:0%"></div></div>
+    <div class="quiz-q-count" id="qCount">1 / 20</div>
+    <div class="quiz-question" id="qText"></div>
+    <div class="quiz-options" id="qOptions"></div>
+    <div class="quiz-explanation" id="qExplanation"></div>
+    <button class="btn btn-primary" id="qNextBtn" style="display:none;" onclick="quizNext()">다음 문제 →</button>
+  </div>
+  <div class="quiz-result" id="quizResult">
+    <div class="score-num" id="quizScore"></div>
+    <p id="quizComment"></p>
+    <button class="btn btn-ghost" style="margin-top:24px;" onclick="quizRestart()">다시 풀기</button>
+  </div>
+</div>
+</main>
+<script>
+const questions = [{"q": "Concurrent(컨커런트)의 정확한 의미는?", "opts": ["GC 스레드가 여러 개인 것", "어플리케이션 코드와 GC가 동시에 실행되는 것", "GC가 병렬로 빠른 것", "STW가 전혀 없는 것"], "ans": 1, "exp": "<strong>Concurrent = GC 스레드가 도는 동안에도 일부 코어에서 어플리케이션 코드가 계속 실행</strong>. Parallel은 GC 스레드 N개가 모두 GC만 수행하고 앱은 멈춤(STW)."}, {"q": "Serial GC가 적합한 환경 2가지는?", "opts": ["멀티코어 + 대용량 힙", "싱글 코어 환경 OR 힙 100MB 이하 소규모", "서버 클래스 머신 (코어 2+, RAM 1.8GB+)", "금융·게임 초저지연 서비스"], "ans": 1, "exp": "① <strong>싱글 코어 환경</strong> (어차피 다중 스레드 의미 없음) ② <strong>힙 100MB 이하 소규모</strong> (동기화 오버헤드가 병렬 이득을 깎아먹음). CPU intensive 작업의 황금률: 스레드 수 ≤ 코어 수."}, {"q": "컨테이너에서 Serial GC가 디폴트로 잡히는 이유는?", "opts": ["컨테이너는 항상 Serial GC를 사용해야 해서", "호스트 머신 스펙이 아닌 컨테이너의 CPU/메모리 크기가 기준이라 client class 판정", "JVM 버그", "Docker 정책"], "ans": 1, "exp": "<strong>컨테이너의 CPU/메모리 크기가 기준</strong>. 호스트 16GB/8코어라도 --cpus=1 -m=1g면 client class → Serial GC 디폴트. -XX:+UseG1GC 등으로 명시해야 안전."}, {"q": "Parallel GC의 철학은?", "opts": ["STW를 완전히 없애기", "Throughput 최우선 — 전체 실행 시간을 줄이는 것", "Latency 최우선", "메모리 절약 최우선"], "ans": 1, "exp": "<strong>Throughput 최우선</strong>. 한 번 STW가 길어도 좋다. 전체 실행 시간을 줄이는 게 중요. MaxGCPauseMillis 디폴트가 no limit이라 사실상 Throughput Collector가 되는 것."}, {"q": "Parallel GC의 가장 큰 단점은?", "opts": ["스레드가 적어서 느림", "힙 4GB 넘으면 STW가 수초~수십초까지 갈 수 있음", "Concurrent를 지원하지 않아서", "Generational을 지원하지 않아서"], "ans": 1, "exp": "<strong>힙 4GB 넘으면 STW가 수초~수십초</strong>. Parallel은 전체 STW만 발생하므로 힙이 클수록 GC 시간도 길어진다. 이게 G1 GC로 넘어간 이유."}, {"q": "G1 GC의 'Mostly Concurrent'가 의미하는 것은?", "opts": ["모든 GC 작업이 Concurrent", "보통의 경우 Concurrent하게 동작하지만 STW가 완전히 0은 아님", "STW가 100ms 이하라는 것", "Generational 없이 동작"], "ans": 1, "exp": "<strong>Mostly = 보통의 경우는 Concurrent</strong>하게 동작. 짧은 STW는 있지만 사용자 입장에서는 수십~수백ms 수준으로 짧아 보인다. STW가 완전히 0인 GC는 없다."}, {"q": "ZGC의 핵심 보장은?", "opts": ["힙 크기가 작을 때만 STW 1ms", "힙 크기와 무관하게 항상 1ms 미만 STW 보장", "STW가 완전히 0", "스루풋이 G1보다 10배 높음"], "ans": 1, "exp": "<strong>힙이 수백MB든 16TB든 STW는 일관되게 1ms 미만. 최선을 다한다가 아니라 보장.</strong> 거의 100% Concurrent 동작으로 이를 달성. 단, 스루풋은 살짝 손해."}, {"q": "ZGC의 제약사항은?", "opts": ["Generational 미지원", "32비트 OS에서 사용 불가 (64비트 전용)", "Oracle JDK에 없음", "JDK 15부터 deprecated"], "ans": 1, "exp": "<strong>64비트 OS 전용</strong> (32비트 불가). 아직 디폴트가 아니라 -XX:+UseZGC 명시 필요. JDK 25에서는 Generational ZGC만 존재 (non-gen 완전 제거)."}, {"q": "CMS GC가 사라진 근본 이유는?", "opts": ["성능이 너무 느려서", "Compact 단계 없음 → 단편화 → Full GC 폭발 → 예측 불가능한 거대 STW", "Oracle이 폐기 결정", "Java 9에서 G1이 더 빨라서"], "ans": 1, "exp": "CMS는 Sweep만 하고 <strong>Compact가 없어 단편화</strong> 발생. 큰 객체 할당 실패 → Full GC 발동 → 싱글 스레드 Compact → STW 수십초. 예측 불가능한 거대 STW → 운영 불가."}, {"q": "Shenandoah GC가 Oracle JDK에 없는 이유는?", "opts": ["Oracle이 ZGC를 밀어서 일부러 빼버림", "Shenandoah가 JDK 25에서 제거됨", "성능이 너무 나빠서", "아직 experimental 단계라서"], "ans": 0, "exp": "<strong>Oracle은 ZGC를 밀고 있어 Shenandoah를 일부러 빼버린다.</strong> OpenJDK(Adoptium, Amazon Corretto 등)에는 둘 다 포함. JDK 25에서 Generational Shenandoah production-ready 승격 (JEP 521)."}, {"q": "JDK 25에서 사용 가능한 GC 목록 중 틀린 것은?", "opts": ["Serial (-XX:+UseSerialGC)", "CMS (-XX:+UseConcMarkSweepGC)", "G1 (디폴트)", "ZGC (-XX:+UseZGC)"], "ans": 1, "exp": "<strong>CMS는 JDK 14에서 완전 제거</strong>. JDK 25 사용 가능: Serial, Parallel, G1(디폴트), ZGC. Shenandoah는 OpenJDK에만 포함."}, {"q": "Generational ZGC가 JDK 23부터 디폴트가 된 의의는?", "opts": ["ZGC 사용 시 자동으로 Generational 모드 활성화", "ZGC가 G1을 대체하는 디폴트 GC가 됨", "STW가 완전히 없어짐", "비제너레이셔널 ZGC가 권장됨"], "ans": 0, "exp": "JDK 23부터 -XX:+UseZGC를 쓰면 <strong>자동으로 Generational ZGC</strong>가 활성화 (-XX:+ZGenerational 명시 불필요). Generational ZGC는 비제너레이셔널 대비 스루풋 10~20% 개선."}, {"q": "컨커런트 컬렉터 진화 계보의 올바른 순서는?", "opts": ["CMS → G1 → ZGC/Shenandoah", "G1 → CMS → ZGC", "ZGC → CMS → G1", "Parallel → ZGC → G1"], "ans": 0, "exp": "<strong>CMS (JDK 5, 최초의 Concurrent)</strong> → <strong>G1 (JDK 9 디폴트)</strong> → <strong>ZGC/Shenandoah (차세대)</strong>. 하드웨어 발전(멀티코어)이 컨커런트 GC 등장의 핵심 동인."}, {"q": "GC 종류 선택 시 처리량(Throughput) vs 지연시간(Latency) 관점에서 양 극단은?", "opts": ["Serial(처리량) vs G1(지연)", "Parallel(처리량 최우선) vs ZGC(지연 1ms 미만 보장)", "G1(처리량) vs Shenandoah(지연)", "Serial vs CMS"], "ans": 1, "exp": "<strong>Parallel GC = Throughput 최우선</strong> (STW 길어도 전체 실행시간 최소화). <strong>ZGC = 지연시간 최우선</strong> (1ms 미만 STW 보장). G1은 그 사이의 균형. 이 트레이드오프가 GC 선택의 핵심 철학."}, {"q": "G1 GC가 범용 디폴트로 채택된 이유는?", "opts": ["STW가 완전히 없어서", "소규모(듀얼코어, 수GB)부터 대규모(32+코어, 수백GB)까지 광범위하게 커버하며 Throughput과 Latency의 균형을 맞춤", "스루풋이 Parallel GC보다 높아서", "메모리 사용량이 가장 적어서"], "ans": 1, "exp": "G1은 <strong>소~대규모 환경을 광범위하게 커버</strong>하며, 높은 스루풋과 수십ms 수준의 Latency를 동시에 달성. MaxPauseMillis 목표를 높은 확률로 준수. 그래서 JDK 9~25 서버 클래스 디폴트."}, {"q": "현업에서 베어메탈 서버의 힙 사이즈 가이드라인은?", "opts": ["물리 메모리의 100% 전부", "물리 메모리의 70~80%", "고정 4GB", "Ergonomics에 완전히 맡김"], "ans": 1, "exp": "<strong>서버 머신 메모리의 70~80% 정도를 힙으로 할당</strong>. 서버는 다수 클라이언트 트래픽 동시 처리. 단, 힙은 자바 프로세스 전체 메모리가 아님 — Metaspace, Native Memory 등 추가 필요 → 100% 불가."}, {"q": "ZGC와 Shenandoah GC의 공통적인 진화 패턴은?", "opts": ["처음부터 Generational로 시작", "논제너레이셔널 → 제너레이셔널로 진화 (스루풋 10~20% 개선)", "Generational → 논제너레이셔널로 단순화", "STW 완전 제거"], "ans": 1, "exp": "둘 다 <strong>논제너레이셔널 → 제너레이셔널</strong>로 진화. 비제너레이셔널은 스루풋이 떨어지고, Generational로 가면 10~20% 개선. ZGC JDK 21, Shenandoah JDK 25에서 Generational production-ready."}, {"q": "컨테이너 환경에서 G1 GC를 보장하려면?", "opts": ["아무것도 안 해도 됨 (항상 G1)", "-XX:+UseG1GC 명시 또는 컨테이너 리소스를 server class 기준 이상으로 설정", "Docker 옵션에 --gc=g1 추가", "JVM 버전을 JDK 9+ 로만 유지"], "ans": 1, "exp": "컨테이너에서는 <strong>-XX:+UseG1GC를 명시적으로 지정</strong>하거나 컨테이너 CPU/메모리를 server class 기준(코어 ≥ 2, RAM > 1792MB) 이상으로 설정해야 안전. 호스트 스펙이 아무리 높아도 컨테이너 제한이 기준."}, {"q": "Parallel GC에서 Ergonomics와의 궁합이 좋은 이유는?", "opts": ["Concurrent GC라서", "MaxGCPauseMillis, GCTimeRatio 옵션을 가장 잘 활용하는 컬렉터 — 자동 튜닝이 가장 잘 동작", "메모리 사용량이 적어서", "STW가 없어서"], "ans": 1, "exp": "Parallel GC는 <strong>MaxGCPauseMillis, GCTimeRatio 옵션을 가장 잘 활용하는 컬렉터</strong>. Behavioral tuning(목표 기반 자동 조정)이 가장 잘 동작한다. 이것이 Parallel GC의 핵심 강점 중 하나."}, {"q": "JEP 523의 목적은?", "opts": ["ZGC를 모든 환경의 디폴트로", "CMS를 부활", "G1을 client class 판정과 무관하게 모든 환경의 디폴트로", "Serial을 개선"], "ans": 2, "exp": "<strong>JEP 523</strong>: client class 판정과 무관하게 <strong>G1을 모든 환경의 디폴트</strong>로 만들자는 제안. G1의 스루풋·메모리 사용량이 Serial에 근접할 만큼 개선되어 컨테이너에서 Serial이 잡히는 함정도 자연스럽게 해소."}];
+
+let qIdx=0,score=0,answered=false;
+function goTo(id){
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  const qs=document.getElementById('quiz-section');
+  if(id==='quiz'){
+    document.querySelectorAll('.section').forEach(s=>s.style.display='none');
+    qs.style.display='block'; quizStart();
+  } else {
+    qs.style.display='none';
+    document.querySelectorAll('.section').forEach(s=>s.style.display='');
+    const t=document.getElementById(id); if(t)t.classList.add('active');
+  }
+  document.querySelectorAll('.nav-item').forEach(n=>{
+    if((id==='quiz'&&n.textContent.includes('퀴즈'))||n.getAttribute('onclick')?.includes(id))n.classList.add('active');
+  });
+}
+function quizStart(){qIdx=0;score=0;answered=false;document.getElementById('quizMain').style.display='block';document.getElementById('quizResult').classList.remove('show');renderQ();}
+function renderQ(){
+  answered=false;
+  const q=questions[qIdx];
+  document.getElementById('qCount').textContent=`${qIdx+1} / ${questions.length}`;
+  document.getElementById('qProgressFill').style.width=`${(qIdx/questions.length)*100}%`;
+  document.getElementById('qText').textContent=q.q;
+  document.getElementById('qExplanation').className='quiz-explanation';
+  document.getElementById('qNextBtn').style.display='none';
+  const keys=['A','B','C','D'];
+  const c=document.getElementById('qOptions');c.innerHTML='';
+  q.opts.forEach((opt,i)=>{
+    const b=document.createElement('button');b.className='quiz-opt';
+    b.innerHTML=`<span class="opt-key">${keys[i]}</span>${opt}`;
+    b.onclick=()=>selectAnswer(i);c.appendChild(b);
+  });
+}
+function selectAnswer(i){
+  if(answered)return;answered=true;
+  const q=questions[qIdx];
+  const btns=document.querySelectorAll('.quiz-opt');
+  btns.forEach(b=>b.disabled=true);
+  if(i===q.ans){btns[i].classList.add('correct');score++;}
+  else{btns[i].classList.add('wrong');btns[q.ans].classList.add('correct');}
+  const exp=document.getElementById('qExplanation');exp.innerHTML=q.exp;exp.classList.add('show');
+  document.getElementById('qNextBtn').style.display='inline-block';
+  document.getElementById('qNextBtn').textContent=qIdx<questions.length-1?'다음 문제 →':'결과 보기 →';
+}
+function quizNext(){qIdx++;if(qIdx>=questions.length)showResult();else renderQ();}
+function showResult(){
+  document.getElementById('quizMain').style.display='none';
+  const pct=Math.round((score/questions.length)*100);
+  document.getElementById('quizScore').textContent=`${score} / ${questions.length}`;
+  let c='';
+  if(pct>=90)c='완벽합니다 🎉 다음 파트로!';
+  else if(pct>=70)c='잘 하셨어요 👍 틀린 챕터를 복습해보세요.';
+  else if(pct>=50)c='절반 통과 ✨ 핵심 챕터를 한 번 더 읽어보세요.';
+  else c='복습이 필요해요 📖 처음부터 다시 읽어보세요.';
+  document.getElementById('quizComment').textContent=`${pct}% 정답률 — ${c}`;
+  document.getElementById('quizResult').classList.add('show');
+}
+function quizRestart(){quizStart();}
+
+</script>
+</body>
+</html>

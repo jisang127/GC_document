@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC 12부 — G1GC 튜닝 가이드</title><link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet"><link rel="stylesheet" href="style.css"></head>
+<body>
+<div id="sidebar">
+  <a class="nav-home" href="index.html">← 목차로</a>
+  <div class="logo"><div class="tag">GC 12부</div><h1>G1GC 튜닝 가이드</h1></div>
+  <nav>
+    <div class="nav-item active" onclick="goTo('s0')"><span class="num">00</span> 결론 & 기본 원칙</div>
+    <div class="nav-item" onclick="goTo('s1')"><span class="num">01</span> Heap 사이즈 조정</div>
+    <div class="nav-item" onclick="goTo('s2')"><span class="num">02</span> Young Generation 튜닝</div>
+    <div class="nav-item" onclick="goTo('s3')"><span class="num">03</span> Young GC 시간 튜닝</div>
+    <div class="nav-item" onclick="goTo('s4')"><span class="num">04</span> Mixed GC 메커니즘</div>
+    <div class="nav-item" onclick="goTo('s5')"><span class="num">05</span> Mixed GC 시간 튜닝</div>
+    <div class="nav-item" onclick="goTo('s6')"><span class="num">06</span> Back-to-back GC</div>
+    <div class="nav-item" onclick="goTo('s7')"><span class="num">07</span> IHOP & Full GC 대응</div>
+    <div class="nav-item" onclick="goTo('s8')"><span class="num">08</span> GC Log sys 튜닝</div>
+    <div class="nav-item" onclick="goTo('s9')"><span class="num">09</span> Q&A & 핵심 정리</div>
+    <div class="nav-item" onclick="goTo('quiz')" style="margin-top:10px;border-top:1px solid var(--border);padding-top:14px;"><span class="num">🧪</span> 퀴즈 (20문제)</div>
+  </nav>
+</div>
+<main id="main">
+<div class="section active" id="s0">
+  <div class="section-header"><div class="chip">Chapter 00</div><h2>결론 먼저 &amp; 기본 원칙</h2></div>
+  <div class="info-box" style="font-size:14px;line-height:1.8;">G1GC의 핵심은 "<strong>Young Generation의 크기를 유연하게 조정</strong>할 수 있어야 한다"는 것. MaxGCPauseMillis를 맞추려면 Young Gen이 어떤 컬렉션에서도 항상 수집되는 영역이라서 거기서 일감의 양을 늘리거나 줄여야 한다. <strong>고정시키는 옵션(NewSize=MaxNewSize, -Xmn)은 절대 쓰면 안 된다.</strong> Oracle JDK 25 공식 문서 기반.</div>
+  <div class="card" style="margin-top:20px;">
+    <h3>기본 튜닝 옵션 두 개</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>옵션</th><th>의미</th><th>디폴트</th></tr></thead><tbody>
+      <tr><td class="code highlight">-XX:MaxGCPauseMillis</td><td>어떤 컬렉션에서도 넘기지 않을 STW 상한</td><td><strong>200ms</strong></td></tr>
+      <tr><td class="code highlight">-Xmx</td><td>최대 힙 사이즈</td><td>ergonomics가 결정 (메모리의 1/4)</td></tr>
+    </tbody></table></div>
+  </div>
+  <div class="cards-2">
+    <div class="card"><h3>스루풋 ↑ 원하면</h3><p>MaxGCPauseMillis <strong>늘리기</strong><br>Xmx 크게 → GC 빈도 자체가 감소</p></div>
+    <div class="card"><h3>레이턴시 ↓ 원하면</h3><p>MaxGCPauseMillis <strong>줄이기</strong> (150ms 등)<br>단, 너무 타이트하면 GC 빈도↑</p></div>
+  </div>
+  <div class="info-box purple">다른 컬렉터에서 마이그레이션 시: CMS, Parallel GC 등에서 G1GC로 넘어올 때는 기존 GC 관련 옵션은 다 지운다. 디폴트 기준으로 시작하는게 원칙.</div>
+</div>
+<div class="section" id="s1">
+  <div class="section-header"><div class="chip">Chapter 01</div><h2>Heap 사이즈 조정</h2></div>
+  <div class="card">
+    <h3>백엔드의 정석: Xmx == Xms</h3>
+    <div class="code-block">-Xmx4g -Xms4g  # 동일하게 맞춤</div>
+    <p style="margin-top:8px;">힙 사이즈가 시작부터 끝까지 고정 → JVM이 OS로부터 메모리를 추가 할당/반환할 일이 없음 → 시스템 콜 오버헤드 제거.</p>
+  </div>
+  <div class="card">
+    <h3>다르게 줄 때만 의미 있는 옵션들 (참고)</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>옵션</th><th>디폴트</th><th>의미</th></tr></thead><tbody>
+      <tr><td class="code">-XX:InitialHeapSize (= -Xms)</td><td>메모리 × 1/64</td><td>초기 힙</td></tr>
+      <tr><td class="code">-XX:MaxHeapSize (= -Xmx)</td><td>메모리 × 1/4</td><td>최대 힙</td></tr>
+      <tr><td class="code">-XX:MinHeapFreeRatio</td><td>40</td><td>프리 영역이 40% 미만이면 힙 늘림</td></tr>
+      <tr><td class="code">-XX:MaxHeapFreeRatio</td><td>70</td><td>프리 영역이 70% 초과면 힙 줄여 OS 반환 (uncommit)</td></tr>
+    </tbody></table></div>
+    <div class="info-box">리사이징 타이밍: <strong>Remark 단계 또는 Full GC 때</strong>. 단, 평가 후 OS 반환(uncommit)은 어플리케이션 코드와 concurrent하게 진행돼 STW 시간을 늘리지 않음.</div>
+  </div>
+</div>
+<div class="section" id="s2">
+  <div class="section-header"><div class="chip purple">Chapter 02</div><h2>Young Generation 사이즈 튜닝 — G1GC의 심장</h2></div>
+  <div class="card">
+    <h3>왜 Young Gen이 핵심인가?</h3>
+    <div class="info-box green">G1GC의 모든 컬렉션(Young/Mixed)에서 항상 수집되는 영역이 Young Generation이다.<br>→ Young Gen의 크기를 유연하게 조정함으로써 처리해야 할 일의 양을 컨트롤 → MaxGCPauseMillis 목표 충족</div>
+  </div>
+  <div class="card">
+    <h3>권장 옵션 — 비율 기반</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>옵션</th><th>디폴트</th><th>의미</th></tr></thead><tbody>
+      <tr><td class="code highlight">-XX:G1NewSizePercent</td><td>5</td><td>전체 힙 대비 Young Gen 최소 비율 (%)</td></tr>
+      <tr><td class="code highlight">-XX:G1MaxNewSizePercent</td><td>60</td><td>전체 힙 대비 Young Gen 최대 비율 (%)</td></tr>
+    </tbody></table></div>
+    <p>비율 기반이라 힙 크기가 바뀌어도 그대로 작동 → 운영 편의.</p>
+  </div>
+  <div class="card">
+    <h3>절대 쓰면 안 되는 옵션 — Young Gen 고정</h3>
+    <div class="code-block"># 이거 절대 하지 마세요
+-XX:NewSize=1g -XX:MaxNewSize=1g
+-Xmn1g           # 위 두 개를 한 번에 설정
+-XX:G1NewSizePercent=N -XX:G1MaxNewSizePercent=N  # 비율이라도 동일하면 동일 결과</div>
+    <div class="info-box red"><strong>핵심 명제:</strong> Young Gen 크기가 고정되면 G1GC는 유연성을 완전히 잃는다. → MaxGCPauseMillis를 맞출 수가 없게 됨. <strong>G1GC에서 가장 치명적인 안티패턴.</strong></div>
+  </div>
+</div>
+<div class="section" id="s3">
+  <div class="section-header"><div class="chip green">Chapter 03</div><h2>Young GC 실행 시간에 따른 튜닝</h2></div>
+  <div class="card">
+    <h3>MaxGCPauseMillis를 지속적으로 초과할 때</h3>
+    <div class="code-block">원인: Young Gen이 이미 디폴트 최소(5%)로 줄었는데도 STW가 200ms 넘김
+      → 객체가 너무 안 죽음 (long-lived)
+대응: G1NewSizePercent를 디폴트(5%)보다 더 줄임 (예: 3%, 1%)
+      힙이 64GB라면 1%만 해도 ~600MB. 작지 않은 영역이라 효과 있음.</div>
+    <div class="info-box yellow">왜 늘리는게 아니라 줄이는가?: Young Gen을 늘리면 → 더 많이 찰 때까지 기다리다가 한 번에 더 많이 살아남은 객체를 카피 → STW 더 길어짐. <strong>방향은 줄이는게 맞음.</strong></div>
+  </div>
+  <div class="card">
+    <h3>MaxGCPauseMillis를 간헐적으로 스파이크할 때</h3>
+    <div class="code-block">원인: 평소엔 OK, 가끔 Young Gen이 60%까지 부풀어 처리량 폭증
+대응: G1MaxNewSizePercent를 60 → 50 등으로 줄임
+      → 아무리 부풀어도 상한선이 낮으니까 STW 시간도 상한선 확보</div>
+  </div>
+</div>
+<div class="section" id="s4">
+  <div class="section-header"><div class="chip yellow">Chapter 04</div><h2>Mixed GC 메커니즘 — Collection Set 3분류</h2></div>
+  <div class="card">
+    <h3>Collection Set 구성</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>분류</th><th>정체</th><th>첫 단계에서 CS에 포함?</th></tr></thead><tbody>
+      <tr><td class="highlight">Young Generation</td><td>Eden + Survivor</td><td>포함</td></tr>
+      <tr><td class="highlight">Minimum Set of Old Regions</td><td>무조건 회수해야 하는 Old Regions</td><td>포함</td></tr>
+      <tr><td class="highlight">Additional Set of Old Regions</td><td>시간 여유분에 추가하는 Old Regions</td><td>포함</td></tr>
+      <tr><td class="highlight">Optional Set of Old Regions</td><td>initial pass 후 남은 시간에 incremental 처리</td><td><strong>포함 안 됨</strong></td></tr>
+    </tbody></table></div>
+  </div>
+  <div class="card">
+    <h3>Minimum Set 계산식</h3>
+    <div class="code-block">Minimum Set 크기 = (Collection Set Candidate Region 개수) / G1MixedGCCountTarget
+                                                                         ↑ 디폴트 8
+
+예: Remark 후 Candidate Region이 160개라면,
+    각 Mixed GC마다 최소 160/8 = 20개를 처리</div>
+  </div>
+  <div class="card">
+    <h3>Additional Set 동작</h3>
+    <div class="code-block">[Mixed GC 한 사이클]
+1. Minimum Set 20개 + Young Gen 포함해서 pause time 예측 → 100ms 예상
+2. 200ms - 100ms = 100ms 여유 있음
+3. 그 100ms의 80% (= 80ms) 까지는 추가 회수 가능
+4. Candidate에서 하나씩 빼서 누적 (가비지 많은 순으로 정렬됨, queue처럼)
+5. 남은 시간이 20ms 이하가 될 때까지 추가 → 추가된 N개가 Additional Set</div>
+    <div class="info-box">왜 Young GC는 200ms를 꽉 안 채우지만 Mixed GC는 꽉 채우려 하는가? → Old Region을 최대한 빨리 회수해야 Full GC를 피할 수 있어서. Mixed GC는 STW 예산을 최대한 활용.</div>
+  </div>
+</div>
+<div class="section" id="s5">
+  <div class="section-header"><div class="chip">Chapter 05</div><h2>Mixed GC 실행 시간에 따른 튜닝</h2></div>
+  <div class="card">
+    <h3>GC log를 보면서 판단</h3>
+    <p>prediction time + eden time + base time이 표시됨. 200ms 넘는 양상을 보면 어디 문제인지 판단:</p>
+    <div class="code-block">Young 쪽 (eden, base) 합이 크면 → 3장 Young GC 튜닝으로
+Old 쪽 (predict initial time)이 크면 → 아래 3옵션으로</div>
+  </div>
+  <div class="card">
+    <h3>Mixed GC가 Old Region 처리에 시간 과다 사용</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>옵션</th><th>디폴트</th><th>효과</th></tr></thead><tbody>
+      <tr><td class="code">-XX:G1MixedGCCountTarget ↑ (예: 8 → 16)</td><td>8</td><td>1회 Mixed GC당 Minimum Set이 절반 → 처리량 감소</td></tr>
+      <tr><td class="code">-XX:G1MixedGCLiveThresholdPercent ↓ (예: 85 → 70)</td><td>85</td><td>live ratio 높은 region은 Candidate에서 제외 → garbage 많은 것만 회수</td></tr>
+      <tr><td class="code">-XX:G1HeapWastePercent ↑ (예: 5 → 15)</td><td>5</td><td>전체 힙 대비 더 많은 % 만큼 "낭비" 허용 → tail pruning 강화</td></tr>
+    </tbody></table></div>
+    <div class="info-box">공통 아이디어: <strong>1회 Mixed GC에 추가되는 Old Region 수를 줄이는 방향</strong> = Old 회수가 늦어지는 트레이드오프 감수.</div>
+  </div>
+</div>
+<div class="section" id="s6">
+  <div class="section-header"><div class="chip purple">Chapter 06</div><h2>Back-to-back GC &amp; GCPauseIntervalMillis</h2></div>
+  <div class="card">
+    <h3>문제: MMU가 0.5%</h3>
+    <div class="code-block">-XX:MaxGCPauseMillis    = 200ms (디폴트)
+-XX:GCPauseIntervalMillis = 0 (디폴트, 0이면 effective = MaxGCPauseMillis + 1 = 201ms)
+                               ↑ 결과적으로 차이가 단 1ms
+
+MMU = (GCPauseInterval - MaxGCPause) / GCPauseInterval
+디폴트 = (201 - 200) / 201 ≈ 0.5%
+→ 어플리케이션이 0.5% 시간만 동작 → 사실상 멈춰 있음 (Back-to-back GC)</div>
+  </div>
+  <div class="card">
+    <h3>해결</h3>
+    <div class="code-block">-XX:GCPauseIntervalMillis=400  # MaxGCPauseMillis의 ~2배 정도부터 시작
+→ MMU 50% 보장. GC 사이 어플리케이션 코드 실행 시간 확보.</div>
+  </div>
+</div>
+<div class="section" id="s7">
+  <div class="section-header"><div class="chip green">Chapter 07</div><h2>IHOP &amp; Full GC 대응</h2></div>
+  <div class="card">
+    <h3>IHOP 정의</h3>
+    <div class="info-box">IHOP (InitiatingHeapOccupancyPercent): 전체 힙 대비 Old Region이 차지하는 비율이 이 값을 넘으면 <strong>Concurrent Start GC를 시작</strong>.</div>
+    <div class="table-wrap" style="margin-top:8px;"><table class="data-table"><thead><tr><th>옵션</th><th>디폴트</th><th>의미</th></tr></thead><tbody>
+      <tr><td class="code">-XX:+G1UseAdaptiveIHOP</td><td>ON (true)</td><td>IHOP을 동적으로 결정</td></tr>
+      <tr><td class="code">-XX:InitiatingHeapOccupancyPercent</td><td>45</td><td>초기값/고정값</td></tr>
+      <tr><td class="code">-XX:G1ReservePercent</td><td>10</td><td>버퍼 (0~50). Old가 (100-10)%=90% 찰 때쯤 Mixed GC 시작되게 IHOP 계산</td></tr>
+    </tbody></table></div>
+  </div>
+  <div class="card">
+    <h3>Full GC 발생 시 대응 방법</h3>
+    <p style="margin-bottom:12px;">Full GC가 났다 = 디폴트 설정만으로 감당이 안 된다는 신호. 대부분 객체 생성 속도가 너무 빨라서 Old Gen이 꽉 차버린 상황.</p>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>방법</th><th>옵션</th><th>비고</th></tr></thead><tbody>
+      <tr><td>1. 힙 사이즈 늘림</td><td class="code">-Xmx, -Xms</td><td>RAM 필요</td></tr>
+      <tr><td>2. Concurrent GC 스레드 증가</td><td class="code">-XX:ConcGCThreads</td><td>어플리케이션 스루풋 하락</td></tr>
+      <tr><td>3. Reserve Percent 증가</td><td class="code">-XX:G1ReservePercent</td><td>유효 힙은 줄어듦</td></tr>
+      <tr><td>4. Adaptive IHOP 끄고 IHOP 명시</td><td class="code">-XX:-G1UseAdaptiveIHOP</td><td>Adaptive 이점 포기</td></tr>
+      <tr><td>5. Region 사이즈 증가</td><td class="code">-XX:G1HeapRegionSize=N</td><td>Humongous 임계치 상승</td></tr>
+    </tbody></table></div>
+    <div class="info-box yellow"><strong>System.gc() 처리:</strong> <span class="inline-code">-XX:+ExplicitGCInvokesConcurrent</span> (Full GC 대신 Concurrent하게) 또는 <span class="inline-code">-XX:+DisableExplicitGC</span> (아예 무시)</div>
+  </div>
+</div>
+<div class="section" id="s8">
+  <div class="section-header"><div class="chip yellow">Chapter 08</div><h2>GC Log의 sys 값이 클 때 — 시스템 시간 튜닝</h2></div>
+  <div class="card">
+    <h3>GC log 읽는 법</h3>
+    <div class="code-block">[Times: user=0.42 sys=0.30 real=0.05 secs]
+          ↑ JVM 코드의 총 합  ↑ OS 커널 코드 시간  ↑ 실제 STW 경과 시간
+          (병렬이라 real != user)</div>
+    <p style="margin-top:8px;">sys가 비정상적으로 크면 OS 호출 비용이 큰 상태.</p>
+  </div>
+  <div class="card">
+    <h3>해결책 3+1가지</h3>
+    <div class="cards-2">
+      <div class="card" style="margin-bottom:12px;"><h3>(1) Xmx == Xms</h3><p>힙 사이즈 변화 = OS commit/uncommit → sys 소비. 동일하게 두면 그 비용 제거.</p></div>
+      <div class="card" style="margin-bottom:12px;"><h3>(2) AlwaysPreTouch</h3><p><span class="inline-code">-XX:+AlwaysPreTouch</span><br>JVM 시작 시 전체 힙 페이지를 한 번씩 터치해서 미리 매핑. 런타임 page fault 제거. 트레이드오프: 부팅 시간 증가.</p></div>
+      <div class="card" style="margin-bottom:0;"><h3>(3) Transparent Huge Pages 끄기</h3><p>OS가 페이지를 동적으로 합치는 작업이 GC pause에 악영향. 운영 시스템에서 THP 기능 끄는 게 권장.</p></div>
+      <div class="card" style="margin-bottom:0;"><h3>(4) GC 로그 I/O 병목</h3><p>GC 로그 write가 다른 I/O와 경합해서 STW 시간이 늘어나는 경우. 로그를 별도 스토리지에 저장하거나 비동기 로깅 사용.</p></div>
+    </div>
+  </div>
+</div>
+<div class="section" id="s9">
+  <div class="section-header"><div class="chip">Chapter 09</div><h2>Q&amp;A &amp; 핵심 정리</h2></div>
+  <div class="card">
+    <h3>자주 헷갈리는 포인트</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>질문</th><th>답</th></tr></thead><tbody>
+      <tr><td>Young GC와 Mixed GC에서 Young Gen 크기가 다르게 잡히나?</td><td>예. Mixed GC가 더 작게 잡힘. Mixed GC는 Young + Old 처리 → 시간 예산을 Old에도 할애하므로 Young Gen이 더 작음.</td></tr>
+      <tr><td>G1UseAdaptiveIHOP을 켰는데도 IHOP 초기값이 의미 있나?</td><td>Adaptive가 통계를 누적하는 데 시간이 걸림. 초기 몇 사이클 동안은 InitiatingHeapOccupancyPercent 값을 사용. 통계가 쌓이면 자동 계산.</td></tr>
+      <tr><td>Mixed GC도 MaxGCPauseMillis를 꽉 채우면 Back-to-Back 위험?</td><td>발생 가능. 그래서 GCPauseIntervalMillis를 MaxGCPauseMillis의 2배 정도로 잡는 게 안전책.</td></tr>
+    </tbody></table></div>
+  </div>
+  <div class="card" style="margin-top:16px;">
+    <h3>면접 대비 핵심 명제</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>#</th><th>명제</th></tr></thead><tbody>
+      <tr><td>1</td><td>G1GC의 디폴트 옵션을 신뢰하라 — 평타 이상</td></tr>
+      <tr><td>2</td><td>백엔드는 <strong>Xmx == Xms • AlwaysPreTouch</strong>가 거의 정석</td></tr>
+      <tr><td>3</td><td><strong>-Xmn, NewSize=MaxNewSize는 G1GC에서 안티패턴.</strong> Young Gen 유연성 = G1GC의 심장</td></tr>
+      <tr><td>4</td><td>Young GC가 MaxGCPauseMillis 자주 초과 → <strong>G1NewSizePercent 감소</strong></td></tr>
+      <tr><td>5</td><td>Young GC 간헐적 스파이크 → <strong>G1MaxNewSizePercent 감소</strong></td></tr>
+      <tr><td>6</td><td>Mixed GC가 Old 처리에 시간 과다 → MixedGCCountTarget↑ / MixedGCLiveThresholdPercent↓ / HeapWastePercent↑</td></tr>
+      <tr><td>7</td><td>Back-to-Back GC → <strong>GCPauseIntervalMillis 증가</strong> (MMU 확보)</td></tr>
+      <tr><td>8</td><td>Full GC 발생 → 힙 증가 / ConcGCThreads 증가 / ReservePercent 증가 / Region size 증가</td></tr>
+      <tr><td>9</td><td>sys time이 크면 → <strong>AlwaysPreTouch + THP 끄기 + 동일 Xmx/Xms</strong></td></tr>
+      <tr><td>10</td><td>Mixed GC의 CS = Young + Minimum Set + Additional Set, incremental하게 Optional Set 추가</td></tr>
+    </tbody></table></div>
+  </div>
+</div>
+<div class="section" id="quiz">
+  <div class="section-header"><div class="chip">퀴즈</div><h2>실력 확인 — 20문제</h2><p>12부 핵심 개념 점검.</p></div>
+  <div id="quizMain">
+    <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="qProgressFill" style="width:0%"></div></div>
+    <div class="quiz-q-count" id="qCount">1 / 20</div>
+    <div class="quiz-question" id="qText"></div>
+    <div class="quiz-options" id="qOptions"></div>
+    <div class="quiz-explanation" id="qExplanation"></div>
+    <button class="btn btn-primary" id="qNextBtn" style="display:none;" onclick="quizNext()">다음 문제 →</button>
+  </div>
+  <div class="quiz-result" id="quizResult">
+    <div class="score-num" id="quizScore"></div><p id="quizComment"></p>
+    <button class="btn btn-ghost" style="margin-top:24px;" onclick="quizRestart()">다시 풀기</button>
+  </div>
+</div>
+</main>
+<script>const questions = [{"q": "G1GC에서 절대 쓰면 안 되는 안티패턴 옵션은?", "o": ["-XX:MaxGCPauseMillis=200", "-XX:G1NewSizePercent=5", "-Xmn1g (Young Gen 고정)", "-XX:G1ReservePercent=10"], "a": 2, "e": "-Xmn이나 NewSize=MaxNewSize는 Young Gen을 고정시켜 G1GC가 유연성을 완전히 잃게 한다. MaxGCPauseMillis를 맞출 수가 없게 되는 G1GC에서 가장 치명적인 안티패턴."}, {"q": "G1GC 백엔드 기본 세팅에서 Xmx == Xms로 동일하게 맞추는 이유는?", "o": ["힙이 고정되어야 GC가 더 빨리 동작", "JVM이 OS로부터 메모리를 추가 할당/반환할 일이 없어 시스템 콜 오버헤드 제거", "Young Gen 크기가 자동 결정됨", "Full GC를 방지하기 위해"], "a": 1, "e": "Xmx == Xms로 힙을 고정하면 JVM이 OS로부터 메모리를 추가 할당하거나 반환할 일이 없어 시스템 콜 오버헤드가 제거된다."}, {"q": "MaxGCPauseMillis를 지속적으로 초과할 때 올바른 튜닝 방향은?", "o": ["G1NewSizePercent를 늘린다", "G1NewSizePercent를 줄인다", "MaxGCPauseMillis를 늘린다", "Young Gen을 고정한다"], "a": 1, "e": "Young Gen을 줄이면 한 번에 처리해야 할 일의 양이 줄어든다. 늘리면 오히려 더 많이 차서 더 많이 살아남은 객체를 카피해야 해 STW가 더 길어진다."}, {"q": "G1MaxNewSizePercent를 줄이는 것이 도움이 되는 시나리오는?", "o": ["MaxGCPauseMillis를 지속적으로 초과할 때", "간헐적으로 Young Gen이 최대치까지 부풀어 스파이크가 발생할 때", "Full GC가 발생할 때", "Evacuation Failure가 발생할 때"], "a": 1, "e": "G1MaxNewSizePercent를 줄이면 Young Gen이 아무리 부풀어도 상한선이 낮아져 간헐적 스파이크를 제어할 수 있다."}, {"q": "Mixed GC의 Minimum Set 크기 계산 공식은?", "o": ["Young Gen 크기 / 8", "Candidate Region 개수 × G1MixedGCCountTarget", "Candidate Region 개수 / G1MixedGCCountTarget", "힙 크기 / G1MixedGCCountTarget"], "a": 2, "e": "Minimum Set 크기 = (Collection Set Candidate Region 개수) / G1MixedGCCountTarget (디폴트 8). 예: Candidate 160개라면 최소 160/8 = 20개."}, {"q": "Mixed GC가 STW 예산(200ms)을 최대한 채우려 하는 이유는?", "o": ["처리량을 최대화하기 위해", "Old Region을 최대한 빨리 회수해야 Full GC를 피할 수 있어서", "영 객체를 더 많이 수집하기 위해", "G1HeapWastePercent를 낮추기 위해"], "a": 1, "e": "Young GC는 200ms를 꽉 안 채우지만, Mixed GC는 Old Region을 최대한 빨리 회수해야 Full GC를 피할 수 있어서 STW 예산을 최대한 활용한다."}, {"q": "Back-to-back GC가 발생하는 원인은?", "o": ["힙이 너무 커서", "GCPauseIntervalMillis 디폴트(0, effective=201ms)와 MaxGCPauseMillis(200ms)의 차이가 1ms뿐이라 GC가 끊임없이 발생", "G1MixedGCCountTarget이 너무 높아서", "Concurrent Marking이 느려서"], "a": 1, "e": "GCPauseIntervalMillis 디폴트 0은 effective = MaxGCPauseMillis + 1 = 201ms이다. MaxGCPauseMillis(200ms)와 차이가 1ms뿐이라 Mixed GC가 거의 끊임없이 발생할 수 있다 (MMU ≈ 0.5%)."}, {"q": "GCPauseIntervalMillis를 400ms로 설정했을 때 MMU는?", "o": ["0.5%", "25%", "50%", "75%"], "a": 2, "e": "MMU = (GCPauseInterval - MaxGCPause) / GCPauseInterval = (400 - 200) / 400 = 50%."}, {"q": "IHOP (InitiatingHeapOccupancyPercent)의 디폴트 값은?", "o": ["10%", "30%", "45%", "70%"], "a": 2, "e": "IHOP의 디폴트는 45%다. 전체 힙 대비 Old Region이 차지하는 비율이 이 값을 넘으면 Concurrent Start GC를 시작한다."}, {"q": "AlwaysPreTouch 옵션의 트레이드오프는?", "o": ["런타임 성능이 저하됨", "GC 빈도가 증가함", "JVM 부팅(시작) 시간이 증가함", "힙 크기가 고정됨"], "a": 2, "e": "AlwaysPreTouch는 JVM 시작 시 전체 힙 영역을 한 번씩 터치해 물리 메모리 매핑을 미리 완료한다. 장점은 런타임 page fault 제거, 트레이드오프는 JVM 부팅 시간 증가다."}, {"q": "G1HeapWastePercent를 높이면 어떤 효과가 있는가?", "o": ["Mixed GC당 더 많은 Old Region을 처리", "Mixed GC당 더 적은 Old Region을 처리 (tail pruning 강화)", "Young Gen 크기가 증가", "Full GC 빈도가 증가"], "a": 1, "e": "G1HeapWastePercent를 높이면 CS가 작아져 Mixed GC가 빨리 끝난다. 값을 키울수록 garbage가 적은 region은 CS에서 제외(tail pruning)되어 1회 Mixed GC에 추가되는 Old Region 수가 줄어든다."}, {"q": "G1MixedGCLiveThresholdPercent를 낮추면 (85→70)?", "o": ["live ratio 높은 region도 포함", "live ratio 높은 region은 Candidate에서 제외 → garbage 많은 것만 회수", "Mixed GC 횟수가 증가", "Young Gen이 더 커짐"], "a": 1, "e": "G1MixedGCLiveThresholdPercent를 낮추면 live ratio가 이 값보다 높은 region(살아있는 객체가 많은 region)은 Candidate에서 제외된다. 즉 garbage가 많은 region만 회수한다."}, {"q": "GC log의 sys 값이 비정상적으로 클 때 의미하는 것은?", "o": ["JVM 코드 실행 시간이 길다", "OS 커널 코드 시간이 크다(OS 호출 비용이 큼)", "실제 STW 경과 시간이 길다", "GC 스레드 수가 부족하다"], "a": 1, "e": "GC log에서 sys는 OS 커널 코드 시간을 나타�다. sys가 비정상적으로 크면 OS 호출 비용(예: 힙 리사이징, page fault)이 큰 상태다."}, {"q": "G1MixedGCCountTarget를 8→16으로 높이면?", "o": ["1회 Mixed GC당 더 많은 Old Region 처리", "1회 Mixed GC당 Minimum Set이 절반으로 줄어 처리량 감소", "Young Gen 크기가 증가", "IHOP 임계치가 낮아짐"], "a": 1, "e": "G1MixedGCCountTarget를 높이면 Candidate Region 개수를 더 많이 나누므로 Minimum Set = Candidate수/CountTarget가 작아진다. 1회 Mixed GC당 처리량이 줄어드는 트레이드오프."}, {"q": "다른 GC에서 G1GC로 마이그레이션할 때 원칙은?", "o": ["기존 GC 옵션을 모두 유지한다", "기존 GC 관련 옵션은 모두 지우고 디폴트 기준으로 시작", "MaxGCPauseMillis만 기존 값으로 유지", "힙 크기 옵션은 그대로 유지"], "a": 1, "e": "CMS, Parallel GC 등에서 G1GC로 넘어올 때는 기존 GC 관련 옵션은 다 지운다. 디폴트 기준으로 시작하는 것이 원칙이다."}, {"q": "Full GC 발생 시 G1HeapRegionSize를 늘리면 어떤 효과가 있는가?", "o": ["Old Gen 공간이 줄어든다", "Humongous로 분류되던 객체가 일반 객체화 → Old 빨리 차지 않음", "Young Gen이 고정된다", "GC 스레드 수가 증가한다"], "a": 1, "e": "Humongous 임계치 = region size / 2이므로, G1HeapRegionSize를 늘리면 기존에 Humongous로 분류되던 객체들이 일반 객체로 분류될 수 있어 Old Gen이 빨리 차지 않는다."}, {"q": "System.gc() 호출이 Full GC 대신 Concurrent하게 처리되게 하는 옵션은?", "o": ["-XX:+DisableExplicitGC", "-XX:+ExplicitGCInvokesConcurrent", "-XX:+G1UseAdaptiveIHOP", "-XX:+AlwaysPreTouch"], "a": 1, "e": "-XX:+ExplicitGCInvokesConcurrent를 사용하면 System.gc() 호출 시 Full GC 대신 Concurrent하게 처리된다. -XX:+DisableExplicitGC는 아예 무시한다."}, {"q": "Optional Set of Old Regions의 특징은?", "o": ["Mixed GC 시작 시 바로 CSet에 포함", "initial pass 후 남은 시간에 incremental하게 처리", "Young Gen과 동시에 처리", "Remark 단계에서 확정"], "a": 1, "e": "Optional Set은 initial pass(Minimum + Additional 처리) 후 남은 시간에 incremental하게 처리된다. 처음 CSet에는 포함되지 않는다."}, {"q": "G1ReservePercent를 높이는 효과는?", "o": ["힙이 더 커진다", "버퍼가 커져서 IHOP이 더 빨리 도달, Mixed GC를 일찍 시작 (유효 힙은 줄어듦)", "GC 스레드 수가 증가", "Old Gen 크기가 고정"], "a": 1, "e": "G1ReservePercent를 높이면 버퍼가 커져서 IHOP이 더 빨리 도달하게 되어 Concurrent Start를 일찍 트리거한다. 단, 실제 사용 가능한 힙(유효 힙)은 줄어든다."}, {"q": "Transparent Huge Pages(THP)를 끄는 이유는?", "o": ["메모리가 너무 많이 사용되어서", "OS가 페이지를 동적으로 합치는 작업이 GC pause에 악영향을 주어서", "GC 스레드와 충돌이 발생해서", "AlwaysPreTouch와 충돌해서"], "a": 1, "e": "OS가 작은 페이지를 자동으로 2MB 단위로 합치는 THP 기능은 그 합치는 작업이 GC pause에 악영향을 준다. 운영 시스템에서 THP 기능 끄는 게 권장된다."}];
+
+let qi=0,score=0,answered=false;
+function goTo(id){
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  if(id==='quiz'){
+    document.getElementById('quiz').classList.add('active');
+    document.querySelectorAll('.nav-item').forEach(n=>{if(n.textContent.includes('퀴즈'))n.classList.add('active');});
+    quizStart();
+  } else {
+    document.getElementById(id).classList.add('active');
+    const navItems=document.querySelectorAll('.nav-item');
+    navItems.forEach(n=>{
+      const num=n.querySelector('.num');
+      if(num&&id.startsWith('s')){
+        const idx=parseInt(id.replace('s',''));
+        if(num.textContent===String(idx).padStart(2,'0'))n.classList.add('active');
+      }
+    });
+  }
+  window.scrollTo(0,0);
+}
+function quizStart(){qi=0;score=0;answered=false;document.getElementById('quizMain').style.display='block';document.getElementById('quizResult').classList.remove('show');renderQ();}
+function renderQ(){const q=questions[qi];document.getElementById('qProgressFill').style.width=((qi/questions.length)*100)+'%';document.getElementById('qCount').textContent=(qi+1)+' / '+questions.length;document.getElementById('qText').textContent=q.q;document.getElementById('qExplanation').className='quiz-explanation';document.getElementById('qExplanation').textContent='';document.getElementById('qNextBtn').style.display='none';answered=false;const opts=document.getElementById('qOptions');opts.innerHTML='';q.o.forEach((o,i)=>{const d=document.createElement('div');d.className='quiz-opt';d.textContent=o;d.onclick=()=>answer(i,d);opts.appendChild(d);});}
+function answer(i,el){if(answered)return;answered=true;const q=questions[qi];document.querySelectorAll('.quiz-opt').forEach((d,j)=>{if(j===q.a)d.classList.add('correct');else if(j===i)d.classList.add('wrong');});if(i===q.a)score++;const exp=document.getElementById('qExplanation');exp.textContent=q.e;exp.classList.add('show');document.getElementById('qNextBtn').style.display='inline-flex';}
+function quizNext(){qi++;if(qi>=questions.length){document.getElementById('quizMain').style.display='none';document.getElementById('quizScore').textContent=score+'/'+questions.length;const pct=Math.round(score/questions.length*100);let c='';if(pct===100)c='완벽해요 🎉';else if(pct>=80)c='훌륭해요 👏';else if(pct>=60)c='잘 하셨어요 👍 틀린 챕터를 복습해보세요.';else if(pct>=40)c='절반 통과 ✨ 한 번 더 읽어보세요.';else c='복습이 필요해요 📖';document.getElementById('quizComment').textContent=pct+'% 정답률 — '+c;document.getElementById('quizResult').classList.add('show');}else{renderQ();}}
+function quizRestart(){quizStart();}
+document.addEventListener('DOMContentLoaded',()=>goTo('s0'));
+</script>
+</body></html>

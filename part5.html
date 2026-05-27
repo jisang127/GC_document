@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC 5부 — 객체 생성과 TLAB</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav id="sidebar">
+  <a class="nav-home" href="index.html">← 목차로</a>
+  <div class="logo"><div class="tag">GC 5부</div><h1 style="font-family:var(--display);font-size:22px;color:#fff;margin-top:4px;">객체 생성과 TLAB</h1></div>
+  <nav>
+<div class="nav-item active" onclick="goTo('s0')"><span class="num">00</span> 개요</div>
+<div class="nav-item" onclick="goTo('s1')"><span class="num">01</span> GC 로그 읽는 법</div>
+<div class="nav-item" onclick="goTo('s2')"><span class="num">02</span> 객체 생성의 문제</div>
+<div class="nav-item" onclick="goTo('s3')"><span class="num">03</span> TLAB 핵심 구조</div>
+<div class="nav-item" onclick="goTo('s4')"><span class="num">04</span> TLAB 옵션</div>
+<div class="nav-item" onclick="goTo('s5')"><span class="num">05</span> GC 성능 지표</div>
+<div class="nav-item" onclick="goTo('s6')"><span class="num">06</span> Xmx / Xms</div>
+<div class="nav-item" onclick="goTo('s7')"><span class="num">07</span> 서버 어플리케이션</div>
+<div class="nav-item" onclick="goTo('s8')"><span class="num">08</span> Young Generation 크기</div>
+<div class="nav-item" onclick="goTo('s9')"><span class="num">09</span> Survivor 크기</div>
+<div class="nav-item" onclick="goTo('s10')"><span class="num">10</span> 튜닝 가이드라인</div>
+    <div class="nav-item" onclick="goTo('quiz')" style="margin-top:10px;border-top:1px solid var(--border);padding-top:14px;"><span class="num">🧪</span> 퀴즈 (20문제)</div>
+  </nav>
+</nav>
+<main id="main">
+<div class="section active" id="s0">
+  <div class="section-header"><div class="chip">GC 5부</div><h2>객체 생성과 TLAB,<br>-Xmx/-Xms, Generation Size</h2><p>Serial GC 기준. TLAB로 빠른 객체 생성, Reserve/Commit 차이, Young Generation 크기 트레이드오프.</p></div>
+  <div class="info-box purple"><strong>핵심:</strong> TLAB 안에서 객체가 생성되기 때문에 매우 빠르게 생성될 수 있다. 이거 하나만큼은 확실히 기억하세요.</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:16px;">
+    <div class="card" style="border-color:rgba(0,212,255,.3);"><h3>TLAB</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">Eden을 스레드별로 독점 구역으로 나눠 race condition 없이 할당</p></div>
+    <div class="card" style="border-color:rgba(245,158,11,.3);"><h3>Reserve vs Commit</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">가상 주소 예약 ≠ RAM 할당. 실제 RAM은 페이지 폴트 시점에</p></div>
+    <div class="card" style="border-color:rgba(16,185,129,.3);"><h3>Young 크기 트레이드오프</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">너무 크면 1회 STW↑, 너무 작으면 GC 빈도↑ — 양극단 모두 Full GC↑</p></div>
+  </div>
+</div>
+<div class="section" id="s1">
+  <div class="section-header"><div class="chip">Chapter 01</div><h2>GC 로그 읽는 법</h2></div>
+  <div class="card"><h3>Serial GC 로그 예시</h3>
+    <div class="code-block">[GC #1] Pause Young (Allocation Failure)
+  DefNew: 87000K → 1500K (96000K)  7ms
+     ↑ Young  before→after(max)     ↑ STW 시간
+  Tenured: 1118K → 1660K   ← Old 살짝 늘어남 = Promotion 발생
+
+[GC #572] Pause Full (System.gc())
+  Phase 1 Mark       ← 살아있는 객체 표시
+  Phase 2 Summary    ← 새 주소 계산
+  Phase 3 Adjust     ← 참조 포인터 업데이트
+  Phase 4 Compact    ← 실제 객체 이동
+  DefNew: 16000K → 0K  ← Full GC 후 Young은 0 (전부 Old로 이동)</div>
+    <table class="data-table" style="margin-top:14px;"><thead><tr><th>키워드</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td class="code highlight">DefNew</td><td>Serial GC 전용 Young 영역 표시 → 키워드만 봐도 GC 종류 추론 가능</td></tr>
+      <tr><td class="code highlight">Tenured</td><td>Serial GC 전용 Old 영역</td></tr>
+      <tr><td class="code highlight">Allocation Failure</td><td>Young 할당 실패 트리거</td></tr>
+    </tbody></table></div>
+</div>
+<div class="section" id="s2">
+  <div class="section-header"><div class="chip">Chapter 02</div><h2>객체 생성의 문제</h2><p>멀티스레드 환경에서 Eden 동시 할당의 race condition.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>문제 상황</h3>
+    <div class="code-block">[Eden 영역 — 공유 공간]
+┌─────────────────────────────────────┐
+│  obj1  obj2  obj3  [Eden Top →]  free │
+└─────────────────────────────────────┘
+        ↑       ↑       ↑
+   Thread1  Thread2  Thread3 ... 가 동시에 할당하려 함</div>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">Tomcat 스레드풀만 해도 기본 수백 개 스레드. 동시 할당 시 Eden Top 위치를 두고 경합 발생 → <strong>Race Condition</strong>.</div></div>
+  <div class="card">
+    <h3>가장 단순한 해법 = 락 → 왜 안 되나?</h3>
+    <p style="font-size:13px;color:var(--text-dim);">객체 생성은 앱 코드에서 가장 빈번한 작업. 매 할당마다 동기화를 걸면 캐시 라인 경합이 일어나 사실상 직렬화되어 병렬성을 죽인다.</p>
+    <div class="info-box red" style="margin-top:12px;margin-bottom:0;">자바 설계자: "이건 자바답지 못한 해법이다."</div></div>
+</div>
+<div class="section" id="s3">
+  <div class="section-header"><div class="chip">Chapter 03</div><h2>TLAB 핵심 구조</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>핵심 아이디어</h3>
+    <div class="code-block">[Eden]
+┌──────────┬──────────┬──────────┬─────────┐
+│  TLAB1   │  TLAB2   │  TLAB3   │  free   │
+│(Thread1) │(Thread2) │(Thread3) │         │
+└──────────┴──────────┴──────────┴─────────┘
+     ↑            ↑           ↑
+각 스레드는 자기 TLAB 안에서만 객체 생성 → 경합 없음</div>
+    <div class="info-box green" style="margin-bottom:0;">주의: ThreadLocal API와 이름만 비슷할 뿐 별개 개념. TLAB는 JVM 내부 메모리 영역 전략.</div></div>
+  <div class="card"><h3>Bump-the-Pointer 할당</h3>
+    <div class="code-block">생성 직전: [↑ptr]
+객체1 후:  [obj1][↑ptr]
+객체2 후:  [obj1][obj2][↑ptr]
+객체3 후:  [obj1][obj2][obj3][↑ptr]
+
+JIT 컴파일 후엔 CPU 명령 약 10개 수준으로 끝남.
+객체 생성이 느릴 거란 직관과 정반대!</div></div>
+</div>
+<div class="section" id="s4">
+  <div class="section-header"><div class="chip">Chapter 04</div><h2>TLAB 옵션</h2><p>Refill과 Resize — 자주 혼동되는 옵션.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Refill vs Resize — 핵심 구분</h3>
+    <table class="data-table"><thead><tr><th>옵션</th><th>역할</th><th>Default</th></tr></thead>
+    <tbody>
+      <tr><td class="code highlight">TLABRefillWasteFraction</td><td>Refill 기준 분모 (refill 판단)</td><td>64</td></tr>
+      <tr><td class="code highlight">TLABWasteIncrement</td><td>Eden 직접 할당 발생 시 기준값 증가 (refill 판단)</td><td>4 HeapWords</td></tr>
+      <tr><td class="code highlight">TLABWasteTargetPercent</td><td>TLAB Desired Size 계산 (Resize 판단)</td><td>1%</td></tr>
+    </tbody></table>
+    <div class="info-box yellow" style="margin-top:12px;margin-bottom:0;">⚠️ 블로그에서 TLABWasteTargetPercent를 "TLAB X% 미만 남으면 refill" 로 잘못 설명하는 경우가 많다. 실제로는 <strong>Resize 옵션</strong>이지 refill 옵션이 아니다.</div></div>
+</div>
+<div class="section" id="s5">
+  <div class="section-header"><div class="chip">Chapter 05</div><h2>GC 성능 지표</h2></div>
+  <div class="card"><h3>4가지 지표</h3>
+    <table class="data-table"><thead><tr><th>지표</th><th>정의</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">Throughput</td><td>전체 실행 시간 중 GC를 뺀 앱 실행 시간 비율. 객체 할당 시간도 앱 시간에 포함</td></tr>
+      <tr><td class="highlight">Latency</td><td>GC로 인한 STW pause 시간. 앱과 병렬로 도는 Concurrent GC 구간은 포함 안 됨</td></tr>
+      <tr><td class="highlight">Footprint</td><td>어플리케이션이 점유하는 물리 메모리 양</td></tr>
+      <tr><td class="highlight">Promptness</td><td>가비지가 된 후 메모리 재사용 가능까지의 시간</td></tr>
+    </tbody></table>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">추세: <strong>Throughput → Latency 중심으로 이동</strong>. G1 GC쪽으로 넘어가는 이유. Throughput 좋아도 API 응답이 60초면 사용자 경험은 망함.</div></div>
+</div>
+<div class="section" id="s6">
+  <div class="section-header"><div class="chip">Chapter 06</div><h2>-Xmx / -Xms</h2><p>Reserve와 Commit의 디테일.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>옵션 표</h3>
+    <table class="data-table"><thead><tr><th>단축 옵션</th><th>풀 옵션</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td class="code highlight">-Xmx&lt;n&gt;</td><td class="code">-XX:MaxHeapSize=&lt;n&gt;</td><td>JVM 힙 최대 크기</td></tr>
+      <tr><td class="code highlight">-Xms&lt;n&gt;</td><td class="code">-XX:InitialHeapSize=&lt;n&gt;</td><td>초기 + 최소 크기</td></tr>
+    </tbody></table></div>
+  <div class="card"><h3>Reserve vs Commit 핵심 구분</h3>
+    <table class="data-table"><thead><tr><th></th><th>의미</th><th>RAM 관계</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">Reserve (예약)</td><td>가상 주소 공간을 연속된 영역으로 찜</td><td>무관 — RAM 할당 X</td></tr>
+      <tr><td class="highlight">Commit (커밋)</td><td>읽기/쓰기 자격 부여</td><td>매핑 가능 상태 (즉시 할당 X)</td></tr>
+      <tr><td class="highlight">실제 RAM 매핑</td><td>데이터 읽고/쓸 때 페이지 폴트 시점</td><td>이때 처음 프레임 단위로 할당</td></tr>
+    </tbody></table></div>
+</div>
+<div class="section" id="s7">
+  <div class="section-header"><div class="chip">Chapter 07</div><h2>서버 어플리케이션<br>— -Xms = -Xmx</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>백엔드 가이드라인</h3>
+    <div class="code-block">java -Xms4g -Xmx4g -jar app.jar</div>
+    <div class="info-box green" style="margin-top:12px;margin-bottom:0;"><strong>백엔드 서버는 항상 -Xms와 -Xmx를 같은 값으로 설정한다.</strong></div></div>
+  <div class="card"><h3>이유 — 면접 포인트</h3>
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <div style="display:flex;gap:10px;padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><span style="color:var(--accent3);font-family:var(--mono);font-size:11px;">✓</span><span>서버 머신 메모리를 JVM이 거의 다 씀. 다른 프로세스와 나눌 일 없음</span></div>
+      <div style="display:flex;gap:10px;padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><span style="color:var(--accent3);font-family:var(--mono);font-size:11px;">✓</span><span>힙 조정 비용 제거 (확장/축소 자체도 GC 시간에 추가)</span></div>
+      <div style="display:flex;gap:10px;padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><span style="color:var(--accent3);font-family:var(--mono);font-size:11px;">✓</span><span>운영 예측성 향상, OOM 예방</span></div>
+    </div>
+    <div class="info-box yellow" style="margin-top:12px;margin-bottom:0;">결과적으로 Ergonomics의 동적 조정이 무력화됨. MaxHeapFreeRatio/MinHeapFreeRatio 옵션 무의미.</div></div>
+</div>
+<div class="section" id="s8">
+  <div class="section-header"><div class="chip">Chapter 08</div><h2>Young Generation<br>크기 — 5부 최대 인사이트</h2></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;">
+    <div class="card" style="border-color:rgba(239,68,68,.25);"><h3 style="color:var(--danger);">Young이 너무 크면</h3>
+      <p style="font-size:12px;color:var(--text-dim);line-height:1.7;">Young GC 빈도 ↓<br>하지만 1회 GC당 STW ↑<br>Old가 작아짐 → <strong>Full GC ↑</strong></p></div>
+    <div class="card" style="border-color:rgba(239,68,68,.25);"><h3 style="color:var(--danger);">Young이 너무 작으면</h3>
+      <p style="font-size:12px;color:var(--text-dim);line-height:1.7;">Young GC 너무 자주<br>Premature promotion → <strong>Full GC ↑</strong></p></div>
+  </div>
+  <div class="info-box red"><strong>양극단 모두 Full GC를 불러온다.</strong> 어플리케이션의 객체 할당 경향성(allocation rate)을 보고 적절한 Young 크기를 찾는 것이 핵심.</div>
+  <div class="card" style="margin-top:14px;"><h3>옵션 우선순위</h3>
+    <table class="data-table"><thead><tr><th>옵션</th><th>의미</th><th>우선순위</th></tr></thead>
+    <tbody>
+      <tr><td class="code">-XX:NewRatio=2</td><td>Old : Young 비율 (default 2)</td><td>가장 약함</td></tr>
+      <tr><td class="code highlight">-XX:NewSize=&lt;n&gt;</td><td>Young 초기/최소 크기</td><td>NewRatio 무시</td></tr>
+      <tr><td class="code highlight">-XX:MaxNewSize=&lt;n&gt;</td><td>Young 최대 크기</td><td>NewRatio 무시</td></tr>
+    </tbody></table></div>
+</div>
+<div class="section" id="s9">
+  <div class="section-header"><div class="chip">Chapter 09</div><h2>Survivor 크기</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>SurvivorRatio 옵션</h3>
+    <table class="data-table"><thead><tr><th>옵션</th><th>Default</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td class="code highlight">-XX:SurvivorRatio=8</td><td>8</td><td>Eden : Survivor = 8 : 1 (Young = Eden : S0 : S1 = 8:1:1)</td></tr>
+    </tbody></table></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+    <div class="card" style="border-color:rgba(239,68,68,.25);"><h3 style="color:var(--danger);">너무 크면</h3><p style="font-size:12px;color:var(--text-dim);">To 영역이 항상 비어있어야 함 → 낭비 → Young 영역 사용 불가 면적 증가</p></div>
+    <div class="card" style="border-color:rgba(239,68,68,.25);"><h3 style="color:var(--danger);">너무 작으면</h3><p style="font-size:12px;color:var(--text-dim);">살아남은 객체가 못 들어가 너무 일찍 Old로 Promotion → Old 빨리 참 → Full GC ↑</p></div>
+  </div>
+</div>
+<div class="section" id="s10">
+  <div class="section-header"><div class="chip">Chapter 10</div><h2>서버 어플리케이션<br>튜닝 가이드라인</h2></div>
+  <div class="card"><h3>실전 순서</h3>
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <div style="display:flex;gap:12px;padding:12px;background:var(--surface2);border-radius:4px;font-size:13px;align-items:flex-start;"><span style="color:var(--accent);font-family:var(--mono);font-size:13px;font-weight:700;min-width:20px;">1</span><span>Pause Time 허용 범위 안에서 <strong>-Xmx 최대한 크게</strong> (물리 메모리 초과 금지)</span></div>
+      <div style="display:flex;gap:12px;padding:12px;background:var(--surface2);border-radius:4px;font-size:13px;align-items:flex-start;"><span style="color:var(--accent);font-family:var(--mono);font-size:13px;font-weight:700;min-width:20px;">2</span><span><strong>-Xms = -Xmx</strong>로 통일</span></div>
+      <div style="display:flex;gap:12px;padding:12px;background:var(--surface2);border-radius:4px;font-size:13px;align-items:flex-start;"><span style="color:var(--accent);font-family:var(--mono);font-size:13px;font-weight:700;min-width:20px;">3</span><span>CPU 코어가 많을수록 힙도 크게 (스레드 ↑ → TLAB ↑ → Eden ↑ 필요)</span></div>
+      <div style="display:flex;gap:12px;padding:12px;background:var(--surface2);border-radius:4px;font-size:13px;align-items:flex-start;"><span style="color:var(--accent);font-family:var(--mono);font-size:13px;font-weight:700;min-width:20px;">4</span><span><strong>Young Generation 크기 충분히 확보</strong> (Young GC에서 끝내고 Full GC 안 가는 게 핵심)</span></div>
+      <div style="display:flex;gap:12px;padding:12px;background:var(--surface2);border-radius:4px;font-size:13px;align-items:flex-start;"><span style="color:var(--accent);font-family:var(--mono);font-size:13px;font-weight:700;min-width:20px;">5</span><span>결론: <strong>다다익선 — 메모리 많을수록 좋다</strong></span></div>
+    </div>
+    <div class="info-box" style="margin-top:14px;margin-bottom:0;"><strong>GC 튜닝 = 영원한 모니터링 + 판단력. 공식 없음.</strong> GC 로그·메모리 그래프(톱니파 패턴)·APM 툴을 보며 평소 패턴 대비 변화 감지.</div></div>
+</div>
+<div id="quiz-section" style="display:none;">
+  <div class="section-header"><div class="chip">퀴즈</div><h2>실력 확인 — 20문제</h2><p>5부 핵심 개념 점검.</p></div>
+  <div id="quizMain">
+    <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="qProgressFill" style="width:0%"></div></div>
+    <div class="quiz-q-count" id="qCount">1 / 20</div>
+    <div class="quiz-question" id="qText"></div>
+    <div class="quiz-options" id="qOptions"></div>
+    <div class="quiz-explanation" id="qExplanation"></div>
+    <button class="btn btn-primary" id="qNextBtn" style="display:none;" onclick="quizNext()">다음 문제 →</button>
+  </div>
+  <div class="quiz-result" id="quizResult">
+    <div class="score-num" id="quizScore"></div>
+    <p id="quizComment"></p>
+    <button class="btn btn-ghost" style="margin-top:24px;" onclick="quizRestart()">다시 풀기</button>
+  </div>
+</div>
+</main>
+<script>
+const questions = [{"q": "TLAB(Thread Local Allocation Buffer)의 목적은?", "opts": ["GC 스레드 간 동기화", "Eden을 스레드별로 독점 구역으로 나눠 race condition 없이 빠른 객체 할당", "Metaspace 관리", "Old Generation 할당 최적화"], "ans": 1, "exp": "Eden은 모든 스레드가 공유 → 동시 할당 시 race condition. <strong>TLAB는 Eden의 일부를 각 스레드에게 독점 할당</strong>해서 경합 없이 객체를 만들게 한다."}, {"q": "TLAB 내부에서의 객체 생성 방식은?", "opts": ["OS에 매번 메모리 요청", "Bump-the-Pointer — 포인터를 객체 크기만큼 이동", "힙 전체 스캔 후 빈 공간 탐색", "Free-list 탐색"], "ans": 1, "exp": "<strong>Bump-the-Pointer</strong>: 포인터를 객체 사이즈만큼 밀기만 하면 됨. JIT 컴파일 후 CPU 명령 약 10개 수준. 객체 생성이 느릴 거란 직관과 정반대."}, {"q": "Fast Path와 Slow Path의 차이는?", "opts": ["Fast Path: GC 수행, Slow Path: 앱 실행", "Fast Path: TLAB 내부 객체 생성(경합 없음), Slow Path: TLAB 밖 Eden 직접 할당 또는 새 TLAB 요청", "Fast Path: Old 할당, Slow Path: Young 할당", "Fast Path: 싱글 스레드, Slow Path: 멀티 스레드"], "ans": 1, "exp": "<strong>Fast Path</strong>: TLAB 내부에서 Bump-the-Pointer로 객체 생성 — 경합 없음, 매우 빠름. <strong>Slow Path</strong>: TLAB 밖 Eden 직접 할당 또는 새 TLAB refill — 경합 발생."}, {"q": "TLAB retire(은퇴)가 발생하면 그 안의 객체는?", "opts": ["모두 가비지로 판정", "가비지 판정과 무관 — GC Root reachability로만 결정", "즉시 Old로 이동", "메모리에서 제거"], "ans": 1, "exp": "TLAB 은퇴는 <strong>어디서부터 객체를 만들지</strong> 정하는 것. 가비지 판정은 여전히 <strong>GC Root reachability</strong>로만 결정된다. TLAB retire ≠ 가비지."}, {"q": "TLABWasteTargetPercent의 실제 역할은?", "opts": ["TLAB가 X% 미만 남으면 refill 트리거", "TLAB 사이즈 재조정(Resize, Desired Size 계산)에 사용", "TLAB의 최대 크기 제한", "Eden 대비 TLAB 비율"], "ans": 1, "exp": "인터넷에서 자주 틀리게 설명되는 포인트. <strong>TLABWasteTargetPercent는 Resize(Desired Size 계산) 옵션</strong>이지 refill 옵션이 아니다. Refill 판단은 TLABRefillWasteFraction + TLABWasteIncrement."}, {"q": "Throughput(스루풋)의 정의는?", "opts": ["1초당 처리하는 요청 수", "전체 실행 시간 중 GC를 뺀 어플리케이션 실행 시간 비율", "GC가 발생하는 빈도", "STW pause 시간"], "ans": 1, "exp": "<strong>Throughput = 어플리케이션 실행 시간 / 전체 실행 시간</strong>. 객체 할당 시간도 어플리케이션 시간에 포함. GC 비중이 낮을수록 Throughput이 높음."}, {"q": "힙 크기를 늘릴 때 Throughput과 Latency에 미치는 영향은?", "opts": ["둘 다 향상", "Throughput 향상(GC 빈도 ↓), Latency 악화(1회 STW ↑)", "둘 다 악화", "Throughput 악화, Latency 향상"], "ans": 1, "exp": "<strong>힙 크게 → GC 빈도 ↓ → Throughput 유리 / 하지만 1회 GC당 객체 많음 → STW 길어짐 → Latency 불리</strong>. 트레이드오프 관계."}, {"q": "-Xms = -Xmx로 설정하는 이유가 아닌 것은?", "opts": ["운영 예측성", "Ergonomics의 동적 조정을 최대 활용", "GC Pause Time 감소 (확장/축소 비용 제거)", "OOM 예방"], "ans": 1, "exp": "<strong>-Xms = -Xmx는 Ergonomics의 동적 조정을 무력화</strong>한다. 백엔드 서버에서 힙을 고정시키는 이유는 자원 데디케이션, 예측성, 확장/축소 비용 제거, OOM 예방이지, Ergonomics 활용이 아님."}, {"q": "Reserve와 Commit의 차이는?", "opts": ["Reserve: RAM 즉시 할당, Commit: 가상 주소 예약", "Reserve: 가상 주소 공간을 연속 영역으로 찜(RAM 무관), Commit: 읽기/쓰기 자격 부여", "Reserve와 Commit은 동일한 의미", "Reserve: 힙 예약, Commit: Metaspace 예약"], "ans": 1, "exp": "<strong>Reserve</strong>: 가상 주소 공간을 연속 영역으로 찜 — RAM 할당 없음. <strong>Commit</strong>: 그 영역에 데이터 읽기/쓰기 자격 부여. 실제 RAM 매핑은 데이터 쓸 때 페이지 폴트 시점."}, {"q": "Young Generation이 너무 크면?", "opts": ["Young GC 빈도 증가", "Young GC 빈도 감소, 1회 STW 증가, Old가 작아져 Full GC 빈도 증가", "모든 GC가 빠르게 끝남", "Minor GC가 아예 발생하지 않음"], "ans": 1, "exp": "<strong>Young 너무 크면</strong>: Eden 차는 데 오래 걸림 → Young GC 빈도 ↓. 하지만 1회 Young GC당 살아남는 객체 많음 → STW ↑. Old가 상대적으로 작아짐 → Full GC 빈도 ↑. 전체 성능 악화."}, {"q": "Young Generation이 너무 작으면?", "opts": ["Full GC가 완전히 없어짐", "GC 너무 자주 발생, 죽었어야 할 객체가 살아남아 premature promotion → Full GC ↑", "Old가 커져서 성능 향상", "TLAB가 더 커짐"], "ans": 1, "exp": "<strong>Young 너무 작으면</strong>: Young GC 너무 자주 발생 → 죽었어야 할 객체가 살아남은 것으로 판정 → Old로 너무 빨리 Promotion → Old 빨리 참 → Full GC ↑."}, {"q": "SurvivorRatio=8의 의미는?", "opts": ["Survivor 크기가 Eden의 8배", "Eden : Survivor = 8 : 1, 즉 Young = Eden : S0 : S1 = 8 : 1 : 1", "8개의 Survivor가 있음", "Survivor를 8번 사용 후 Old로 이동"], "ans": 1, "exp": "<strong>SurvivorRatio=8 → Eden : (S0+S1) = 8 : 2 → Eden : S0 : S1 = 8 : 1 : 1</strong>. Young 전체에서 Eden이 80%, S0과 S1이 각 10%."}, {"q": "Survivor가 너무 크면?", "opts": ["Old로 너무 빨리 Promotion", "Copying Collector 특성상 To 영역이 항상 비어있어야 해서 낭비 → Eden 면적 감소", "Young GC가 빨라짐", "객체 생성이 빨라짐"], "ans": 1, "exp": "<strong>Survivor 너무 크면</strong>: To 영역(S0/S1 중 하나는 항상 비어야 함) 낭비 → Young 영역에서 사용 불가 면적 증가 → Eden이 상대적으로 작아짐."}, {"q": "백엔드 서버 튜닝 가이드라인 1순위는?", "opts": ["Young Generation을 최대화", "Pause Time 허용 범위 안에서 -Xmx 최대한 크게 (단, 물리 메모리 초과 금지)", "GCTimeRatio를 0으로 설정", "Survivor를 없애기"], "ans": 1, "exp": "<strong>Pause Time 허용 범위 안에서 -Xmx를 최대한 크게</strong>. 단 물리 메모리를 초과하면 스왑이 발생해 디스크 I/O로 성능이 폭망. 그 다음 -Xms = -Xmx로 통일."}, {"q": "GC 성능 지표 중 Footprint란?", "opts": ["GC로 인한 STW 시간", "전체 실행 시간 중 GC 비율", "어플리케이션이 점유하는 물리 메모리 양", "GC가 발생하는 횟수"], "ans": 2, "exp": "<strong>Footprint</strong>: 어플리케이션이 점유하는 물리 메모리 양. 다른 프로세스와 공유하는 환경에서 중요. 힙을 너무 크게 잡으면 Footprint가 커져 다른 프로세스에 영향을 줄 수 있다."}, {"q": "TLAB Refill 트리거 기준은?", "opts": ["TLAB가 절반 이상 찼을 때", "새 객체가 남은 공간보다 크고, 남은 공간 ≤ refill_waste_limit 일 때", "Young GC 발생 시", "TLAB 생성 후 일정 시간 경과"], "ans": 1, "exp": "새 객체 크기 > TLAB 남은 공간일 때: <strong>남은 공간 ≤ refill_waste_limit(≈TLAB의 1.5%) → Refill</strong>. 남은 공간 > refill_waste_limit → Eden 직접 할당(TLAB 유지)."}, {"q": "CPU 코어가 많을수록 힙도 크게 잡아야 하는 이유는?", "opts": ["코어가 많으면 GC도 더 많이 필요", "스레드가 더 많아 TLAB도 더 많이 필요 → Eden이 커야 함", "OS 요구사항", "GC 스레드 수와 무관"], "ans": 1, "exp": "코어 많음 → <strong>스레드 더 많이</strong> → TLAB도 더 많이 필요 → Eden이 그만큼 커야 함 → 전체 힙이 커야 함."}, {"q": "GC 로그에서 'DefNew'가 의미하는 것은?", "opts": ["G1 GC의 Young 영역", "Serial GC 전용 Young 영역 표시", "Parallel GC의 Eden", "ZGC의 Generation"], "ans": 1, "exp": "<strong>DefNew</strong>는 Serial GC에서 사용하는 Young 영역 로그 키워드. 로그 키워드만 봐도 GC 종류를 추론할 수 있다. Parallel은 PSYoungGen, G1은 Eden 등."}, {"q": "GC 튜닝의 핵심 공식은?", "opts": ["공식이 있어 한 번만 설정하면 됨", "영원한 모니터링 + 판단력. 공식 없음", "힙 크기 = RAM × 0.75 항상 적용", "GC 스레드 수 = CPU 코어 수"], "ans": 1, "exp": "<strong>GC 튜닝 = 영원한 모니터링 + 판단력. 공식 없음.</strong> GC 로그·메모리 그래프(톱니파 패턴)·APM 툴을 보며 평소 패턴 대비 변화를 감지하는 것이 핵심."}, {"q": "메모리 릭(leak) 발생 시 GC 메모리 그래프 패턴은?", "opts": ["매우 빠른 톱니파", "GC 후에도 메모리가 내려가지 않고 계속 상승 (안 떨어짐)", "메모리가 즉시 0으로 감", "일정하게 유지"], "ans": 1, "exp": "정상: 톱니파 (GC 후 메모리 내려감). <strong>메모리 릭</strong>: GC는 도는데 회수가 안 됨 → 메모리가 계속 상승해서 내려오지 않는 패턴."}];
+
+let qIdx=0,score=0,answered=false;
+function goTo(id){
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  const qs=document.getElementById('quiz-section');
+  if(id==='quiz'){
+    document.querySelectorAll('.section').forEach(s=>s.style.display='none');
+    qs.style.display='block'; quizStart();
+  } else {
+    qs.style.display='none';
+    document.querySelectorAll('.section').forEach(s=>s.style.display='');
+    const t=document.getElementById(id); if(t)t.classList.add('active');
+  }
+  document.querySelectorAll('.nav-item').forEach(n=>{
+    if((id==='quiz'&&n.textContent.includes('퀴즈'))||n.getAttribute('onclick')?.includes(id))n.classList.add('active');
+  });
+}
+function quizStart(){qIdx=0;score=0;answered=false;document.getElementById('quizMain').style.display='block';document.getElementById('quizResult').classList.remove('show');renderQ();}
+function renderQ(){
+  answered=false;
+  const q=questions[qIdx];
+  document.getElementById('qCount').textContent=`${qIdx+1} / ${questions.length}`;
+  document.getElementById('qProgressFill').style.width=`${(qIdx/questions.length)*100}%`;
+  document.getElementById('qText').textContent=q.q;
+  document.getElementById('qExplanation').className='quiz-explanation';
+  document.getElementById('qNextBtn').style.display='none';
+  const keys=['A','B','C','D'];
+  const c=document.getElementById('qOptions');c.innerHTML='';
+  q.opts.forEach((opt,i)=>{
+    const b=document.createElement('button');b.className='quiz-opt';
+    b.innerHTML=`<span class="opt-key">${keys[i]}</span>${opt}`;
+    b.onclick=()=>selectAnswer(i);c.appendChild(b);
+  });
+}
+function selectAnswer(i){
+  if(answered)return;answered=true;
+  const q=questions[qIdx];
+  const btns=document.querySelectorAll('.quiz-opt');
+  btns.forEach(b=>b.disabled=true);
+  if(i===q.ans){btns[i].classList.add('correct');score++;}
+  else{btns[i].classList.add('wrong');btns[q.ans].classList.add('correct');}
+  const exp=document.getElementById('qExplanation');exp.innerHTML=q.exp;exp.classList.add('show');
+  document.getElementById('qNextBtn').style.display='inline-block';
+  document.getElementById('qNextBtn').textContent=qIdx<questions.length-1?'다음 문제 →':'결과 보기 →';
+}
+function quizNext(){qIdx++;if(qIdx>=questions.length)showResult();else renderQ();}
+function showResult(){
+  document.getElementById('quizMain').style.display='none';
+  const pct=Math.round((score/questions.length)*100);
+  document.getElementById('quizScore').textContent=`${score} / ${questions.length}`;
+  let c='';
+  if(pct>=90)c='완벽합니다 🎉 다음 파트로!';
+  else if(pct>=70)c='잘 하셨어요 👍 틀린 챕터를 복습해보세요.';
+  else if(pct>=50)c='절반 통과 ✨ 핵심 챕터를 한 번 더 읽어보세요.';
+  else c='복습이 필요해요 📖 처음부터 다시 읽어보세요.';
+  document.getElementById('quizComment').textContent=`${pct}% 정답률 — ${c}`;
+  document.getElementById('quizResult').classList.add('show');
+}
+function quizRestart(){quizStart();}
+
+</script>
+</body>
+</html>

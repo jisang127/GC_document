@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC 4부 — Generational GC</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav id="sidebar">
+  <a class="nav-home" href="index.html">← 목차로</a>
+  <div class="logo"><div class="tag">GC 4부</div><h1 style="font-family:var(--display);font-size:22px;color:#fff;margin-top:4px;">Generational GC</h1></div>
+  <nav>
+<div class="nav-item active" onclick="goTo('s0')"><span class="num">00</span> 개요</div>
+<div class="nav-item" onclick="goTo('s1')"><span class="num">01</span> GC Root와 Reachability</div>
+<div class="nav-item" onclick="goTo('s2')"><span class="num">02</span> 왜 Generational?</div>
+<div class="nav-item" onclick="goTo('s3')"><span class="num">03</span> Remembered Set</div>
+<div class="nav-item" onclick="goTo('s4')"><span class="num">04</span> GC 알고리즘 3종</div>
+<div class="nav-item" onclick="goTo('s5')"><span class="num">05</span> Eden + Survivor 구조</div>
+<div class="nav-item" onclick="goTo('s6')"><span class="num">06</span> Minor GC 동작</div>
+<div class="nav-item" onclick="goTo('s7')"><span class="num">07</span> Major GC / Full GC</div>
+<div class="nav-item" onclick="goTo('s8')"><span class="num">08</span> 핵심 인사이트</div>
+    <div class="nav-item" onclick="goTo('quiz')" style="margin-top:10px;border-top:1px solid var(--border);padding-top:14px;"><span class="num">🧪</span> 퀴즈 (20문제)</div>
+  </nav>
+</nav>
+<main id="main">
+<div class="section active" id="s0">
+  <div class="section-header"><div class="chip">GC 4부</div><h2>Generational GC<br>(세대별 컬렉션)</h2><p>대부분의 객체는 태어나서 금방 죽는다 — 이 경험칙이 Generational GC의 모든 것을 설명한다.</p></div>
+  <div class="info-box purple"><strong>핵심 결론:</strong> GC는 이름과 달리 garbage가 아니라 <strong>live object를 추적</strong>한다 — 사실은 "Live Collector"에 가깝다.</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:16px;">
+    <div class="card" style="border-color:rgba(0,212,255,.3);"><h3>Weak Gen. Hypothesis</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">대부분 객체는 금방 죽음. 오래된 객체는 젊은 객체를 거의 참조하지 않음.</p></div>
+    <div class="card" style="border-color:rgba(16,185,129,.3);"><h3>Mark-Copy</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">Young에서 사용. Live object만 복사 → 비용이 live 수에 비례.</p></div>
+    <div class="card" style="border-color:rgba(245,158,11,.3);"><h3>Remembered Set</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">Old→Young 참조를 별도 관리. Minor GC의 추가 GC Root.</p></div>
+  </div>
+</div>
+<div class="section" id="s1">
+  <div class="section-header"><div class="chip">Chapter 01</div><h2>GC Root와<br>Reachability</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Reachability = Garbage 판정 기준</h3>
+    <div class="info-box" style="margin-bottom:12px;"><strong>객체가 un-reachable ⟹ Garbage</strong><br>"어디서부터" un-reachable인가? → GC Root에서부터</div>
+    <table class="data-table"><thead><tr><th>GC Root 종류</th><th>설명</th><th>중요도</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">Thread Stack</td><td>모든 active 스레드의 스택 (지역 변수, 매개 변수)</td><td><span class="tag-green">핵심</span></td></tr>
+      <tr><td class="highlight">Thread 객체</td><td>java.lang.Thread 객체, ThreadLocal/Runnable 참조</td><td><span class="tag-green">핵심</span></td></tr>
+      <tr><td class="highlight">Class Loader</td><td>로딩된 클래스가 참조 (특히 static 변수)</td><td><span class="tag-green">핵심</span></td></tr>
+      <tr><td>JNI 참조</td><td>네이티브 코드에서 참조하는 객체</td><td>참고</td></tr>
+    </tbody></table></div>
+  <div class="info-box green">GC Root는 JVM Heap 밖의 Native Memory에 관리된다. Live 객체를 찾기 위한 출발점.</div>
+</div>
+<div class="section" id="s2">
+  <div class="section-header"><div class="chip">Chapter 02</div><h2>왜 Generational인가</h2><p>통짜 힙의 한계와 공간 분리 해결책.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Weak Generational Hypothesis</h3>
+    <div class="code-block">객체 수
+  ↑ ▲
+  │ █
+  │ █▓
+  │ █▓░
+  │ █▓░░ ...  ▲ (오래 살아남은 객체)
+  └──────────────────→ 라이프타임
+     대부분 여기서 죽음     일부는 끝까지 산다</div>
+    <div class="info-box purple" style="margin-bottom:0;"><strong>"대부분의 객체는 태어나서 금방 죽는다"</strong> — GC의 핵심 동작 원리</div></div>
+  <div class="card"><h3>공간 분리 해결책</h3>
+    <div class="code-block">┌──────────────┬──────────────────┐
+│   Young Gen  │    Old Gen       │
+└──────────────┴──────────────────┘</div>
+    <p style="font-size:13px;color:var(--text-dim);">Young과 Old를 물리적으로 분리 → young만 컬렉팅 시 old는 건들지 않음 → 주소만 봐도 young/old 구분 가능.</p></div>
+</div>
+<div class="section" id="s3">
+  <div class="section-header"><div class="chip">Chapter 03</div><h2>Remembered Set</h2><p>Old → Young 참조를 별도로 관리하는 이유.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>문제 상황</h3>
+    <div class="code-block">[Old object] ───참조───→ [Young object]
+
+Young만 컬렉팅 시 GC Root에서 Old 객체로 가지 않으므로,
+Old가 참조하는 Young 객체를 놓침 → garbage 오판!</div></div>
+  <div class="card"><h3>Remembered Set 정의</h3>
+    <table class="data-table"><thead><tr><th>항목</th><th>내용</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">무엇을 저장</td><td>Young 객체를 참조하고 있는 <strong>Old 객체의 주소</strong></td></tr>
+      <tr><td class="highlight">동작 시점</td><td>Minor GC 때만 사용</td></tr>
+      <tr><td class="highlight">역할</td><td>Minor GC 때 추가적인 <strong>GC Root 역할</strong></td></tr>
+    </tbody></table>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">💡 면접 포인트: "리멤버드 셋은 마이너 GC에서 GC Root 역할을 한다"</div></div>
+</div>
+<div class="section" id="s4">
+  <div class="section-header"><div class="chip">Chapter 04</div><h2>GC 알고리즘 3종</h2></div>
+  <div class="card" style="margin-bottom:14px;"><h3>① Mark-Sweep — 단순하지만 단편화</h3>
+    <div class="code-block">처리 전: [live][free][live][free][free][live]
+처리 후: [live][    ][live][         ][live]
+  ↑ 총 free 공간은 있어도 연속 공간이 없어 큰 객체 할당 실패</div></div>
+  <div class="card" style="margin-bottom:14px;"><h3>② Mark-Sweep-Compact — 압축 추가, 비용 높음</h3>
+    <div class="code-block">4단계 (Linear Scan 3회):
+1. Mark: GC Root부터 live object 마킹
+2. Compute: live 객체의 새 주소 계산 → 헤더에 Forwarding Address
+3. Update: 모든 참조를 새 주소로 갱신
+4. Copy: 실제 객체 이동
+비용: 힙 크기 + 전체 객체 수에 비례 (비싸다)</div></div>
+  <div class="card" style="border-color:rgba(16,185,129,.3);"><h3 style="color:var(--accent3);">③ Mark-Copy ★ 가장 중요 (Young에서 사용)</h3>
+    <div class="code-block">빈 공간을 따로 잡아두고, GC Root에서 따라가며 live만 복사
+
+[현재 영역 꽉참]   →   [빈 공간(예약)]
+[A][G][B][G][C]         [         ]
+                ↓ 복사 후
+[free 영역    ]         [A][B][C]</div>
+    <div class="info-box green" style="margin-bottom:0;">비용이 <strong>live object 수에 비례</strong>. 대부분 객체가 죽으면 live가 적음 → Mark-Copy가 Young에 잘 맞는다.</div></div>
+</div>
+<div class="section" id="s5">
+  <div class="section-header"><div class="chip">Chapter 05</div><h2>Eden + Survivor 0/1<br>최종 구조</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>왜 Survivor가 두 개인가?</h3>
+    <p style="font-size:13px;color:var(--text-dim);margin-bottom:12px;">Mark-Copy는 빈 공간이 필수. 다음 Minor GC에서도 Mark-Copy를 쓰려면 복사 대상 공간이 필요하다.</p>
+    <div class="code-block">Eden(생성용) + Survivor 0(현재 사용) + Survivor 1(다음 카피 대상)
+                    → 항상 하나는 비어있어야 한다</div></div>
+  <div class="card"><h3>영역 구조와 디폴트 비율</h3>
+    <div class="code-block">┌───────────────────────────────────┬──────────────────┐
+│          Young Generation         │  Old Generation  │
+│ ┌──────────────┬───────┬───────┐ │                  │
+│ │     Eden     │  S0   │  S1   │ │        2         │
+│ │      8       │   1   │   1   │ │                  │
+│ └──────────────┴───────┴───────┘ │                  │
+└───────────────────────────────────┴──────────────────┘
+Young : Old = 1 : 2  /  Eden : S0 : S1 = 8 : 1 : 1</div>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">Survivor가 저렇게 작은 것 자체가 '대부분 객체가 금방 죽는다'는 가설을 디폴트 값이 반영하는 증거.</div></div>
+</div>
+<div class="section" id="s6">
+  <div class="section-header"><div class="chip">Chapter 06</div><h2>Minor GC 동작</h2><p>Mark-Copy + Forwarding Address.</p></div>
+  <div class="card"><h3>Minor GC 시나리오</h3>
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      <div style="display:flex;gap:12px;padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;align-items:flex-start;"><span style="color:var(--accent);font-family:var(--mono);font-size:11px;font-weight:700;min-width:16px;">1</span><span><strong>트리거:</strong> Eden이 가득 차서 새 객체 할당 불가</span></div>
+      <div style="display:flex;gap:12px;padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;align-items:flex-start;"><span style="color:var(--accent);font-family:var(--mono);font-size:11px;font-weight:700;min-width:16px;">2</span><span><strong>GC Root 탐색:</strong> GC Root + Remembered Set에 등록된 Old 객체에서 출발</span></div>
+      <div style="display:flex;gap:12px;padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;align-items:flex-start;"><span style="color:var(--accent);font-family:var(--mono);font-size:11px;font-weight:700;min-width:16px;">3</span><span><strong>Live 객체 복사:</strong> S0(빈 Survivor)로 복사. 원래 위치 헤더에 Forwarding Address 기록</span></div>
+      <div style="display:flex;gap:12px;padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;align-items:flex-start;"><span style="color:var(--accent);font-family:var(--mono);font-size:11px;font-weight:700;min-width:16px;">4</span><span><strong>Age 임계치 도달:</strong> S0가 아닌 Old로 Promotion. Old → Young 참조면 Remembered Set 등록</span></div>
+      <div style="display:flex;gap:12px;padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;align-items:flex-start;"><span style="color:var(--accent);font-family:var(--mono);font-size:11px;font-weight:700;min-width:16px;">5</span><span><strong>완료:</strong> Eden + S1(이전 Survivor) 전부 free 처리. 다음 Minor GC에서 역할 스왑</span></div>
+    </div></div>
+</div>
+<div class="section" id="s7">
+  <div class="section-header"><div class="chip">Chapter 07</div><h2>Major GC / Full GC</h2><p>왜 Full GC가 느린가.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Full GC 트리거 조건</h3>
+    <table class="data-table"><thead><tr><th>트리거</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">Young GC 직전 휴리스틱</td><td>평소 promotion 양을 보고 Old에 공간 부족 예상 → Full GC</td></tr>
+      <tr><td class="highlight">Promotion 실패</td><td>Minor GC 중 Old에 공간 없음 → Full GC</td></tr>
+      <tr><td class="highlight">Huge object 할당 실패</td><td>큰 객체는 Old에 바로 할당, 공간 없으면 Full GC</td></tr>
+    </tbody></table></div>
+  <div class="card"><h3>Minor GC vs Full GC 비교</h3>
+    <table class="data-table"><thead><tr><th>요인</th><th>Minor GC</th><th>Full GC</th></tr></thead>
+    <tbody>
+      <tr><td>대상 공간</td><td>Young만</td><td class="highlight">전체 힙</td></tr>
+      <tr><td>객체 수</td><td>적음 (대부분 죽음)</td><td class="highlight">많음 (Old에 누적)</td></tr>
+      <tr><td>알고리즘</td><td>Mark-Copy (live에 비례)</td><td class="highlight">Mark-Sweep-Compact (전체에 비례)</td></tr>
+    </tbody></table>
+    <div class="info-box red" style="margin-top:12px;margin-bottom:0;">⟹ 단순히 공간만 넓어진 게 아니라 <strong>알고리즘 자체가 더 비싼 것</strong>을 쓴다.</div></div>
+</div>
+<div class="section" id="s8">
+  <div class="section-header"><div class="chip">Chapter 08</div><h2>핵심 인사이트</h2><p>GC는 사실 "Live Collector"다.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>통념 vs 실제</h3>
+    <table class="data-table"><thead><tr><th>통념</th><th>실제</th></tr></thead>
+    <tbody>
+      <tr><td>Garbage가 많을수록 오래 걸린다?</td><td class="highlight">Live object가 많을수록 오래 걸린다</td></tr>
+    </tbody></table>
+    <div class="info-box purple" style="margin-top:12px;margin-bottom:0;">알고리즘을 뜯어보면 추적 대상은 garbage가 아니라 <strong>live object</strong>다.</div></div>
+  <div class="card"><h3>실무 영향: 로컬 캐시(Caffeine 등)의 함정</h3>
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <div style="display:flex;gap:12px;padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><span style="color:var(--danger);">→</span><span>캐시된 객체는 항상 reachable ⟹ GC가 매번 다 추적해야 함</span></div>
+      <div style="display:flex;gap:12px;padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><span style="color:var(--danger);">→</span><span>절대 수집되지 않음 (참조가 계속 유지) → age 차서 Old에 쌓임</span></div>
+      <div style="display:flex;gap:12px;padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><span style="color:var(--danger);">→</span><span>Full GC 빈도 ↑, GC 시간 ↑, 회수되는 메모리는 거의 없음</span></div>
+    </div>
+    <div class="info-box red" style="margin-top:12px;margin-bottom:0;">트래픽이 많은 백엔드에서는 "캐시를 무조건 많이 넣는 것"이 GC 성능을 갉아먹을 수 있다.</div></div>
+</div>
+<div id="quiz-section" style="display:none;">
+  <div class="section-header"><div class="chip">퀴즈</div><h2>실력 확인 — 20문제</h2><p>4부 핵심 개념 점검.</p></div>
+  <div id="quizMain">
+    <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="qProgressFill" style="width:0%"></div></div>
+    <div class="quiz-q-count" id="qCount">1 / 20</div>
+    <div class="quiz-question" id="qText"></div>
+    <div class="quiz-options" id="qOptions"></div>
+    <div class="quiz-explanation" id="qExplanation"></div>
+    <button class="btn btn-primary" id="qNextBtn" style="display:none;" onclick="quizNext()">다음 문제 →</button>
+  </div>
+  <div class="quiz-result" id="quizResult">
+    <div class="score-num" id="quizScore"></div>
+    <p id="quizComment"></p>
+    <button class="btn btn-ghost" style="margin-top:24px;" onclick="quizRestart()">다시 풀기</button>
+  </div>
+</div>
+</main>
+<script>
+const questions = [{"q": "GC Root의 역할은?", "opts": ["힙 메모리 크기를 결정", "Live 객체 탐색의 출발점", "GC 스레드 수를 제어", "Metaspace 크기를 결정"], "ans": 1, "exp": "GC Root는 <strong>Live 객체를 찾기 위한 출발점</strong>. GC Root에서 reachable한 객체는 살아있는 것, unreachable하면 가비지. JVM Heap 밖 Native Memory에 관리됨."}, {"q": "Weak Generational Hypothesis(약한 세대별 가설)는?", "opts": ["오래된 객체가 더 빨리 죽는다", "대부분의 객체는 태어나서 금방 죽는다 / 오래된 객체가 젊은 객체를 거의 참조하지 않는다", "모든 객체는 동일한 수명을 가진다", "Young 객체가 Old 객체를 절대 참조하지 않는다"], "ans": 1, "exp": "<strong>①대부분의 객체는 태어나서 금방 죽는다</strong> / <strong>②오래된 객체가 더 젊은 객체를 참조하는 경우는 거의 없다</strong>. 이 두 관찰이 Generational GC 설계의 근거."}, {"q": "Remembered Set에 저장되는 것은?", "opts": ["Young 객체의 주소", "Young 객체를 참조하고 있는 Old 객체의 주소", "Old 객체의 주소", "GC Root의 주소"], "ans": 1, "exp": "<strong>Old → Young 참조</strong>를 별도로 관리. Minor GC 시 GC Root 외에 Remembered Set도 추가 GC Root 역할을 한다."}, {"q": "Minor GC 시 Remembered Set이 필요한 이유는?", "opts": ["Old 객체가 너무 많아서", "Young만 컬렉팅할 때 Old가 참조하는 Young 객체를 놓치는 것을 방지하기 위해", "RAM 절약을 위해", "GC 속도 향상을 위해"], "ans": 1, "exp": "Young만 컬렉팅 시 GC Root → Old 객체로 가지 않으므로, <strong>Old가 참조하는 Young을 놓쳐 live 객체를 garbage로 오판</strong>할 수 있다. Remembered Set이 이를 방지."}, {"q": "Mark-Sweep의 단점은?", "opts": ["속도가 너무 느림", "단편화(Fragmentation) 발생 — 빈 공간 총합은 충분해도 연속 공간 부족", "메모리를 너무 많이 사용", "멀티스레드를 지원하지 않음"], "ans": 1, "exp": "Mark-Sweep은 빠르지만 <strong>단편화(Fragmentation)</strong>가 발생. 큰 객체를 할당하려 해도 연속된 공간이 없어 실패할 수 있음."}, {"q": "Mark-Copy 알고리즘의 성능이 비례하는 것은?", "opts": ["전체 힙 크기", "Garbage 객체 수", "Live object 수", "힙의 단편화 정도"], "ans": 2, "exp": "Mark-Copy는 <strong>Live object만 추적하여 복사</strong>. 비용이 live object 수에 비례. Weak Generational Hypothesis에 따라 Young에는 live가 적으므로 Young에 잘 맞는 알고리즘."}, {"q": "Mark-Copy에서 빈 공간(Survivor To 영역)이 반드시 필요한 이유는?", "opts": ["GC 로그를 위한 공간", "live 객체를 복사할 대상 영역이 필요하기 때문", "Old로 promotion을 위한 임시 공간", "JVM 내부 사용"], "ans": 1, "exp": "Mark-Copy는 현재 영역의 live 객체를 <strong>비어있는 To 영역으로 복사</strong>. 빈 공간이 없으면 복사 불가. 그래서 Survivor 0/1 두 개가 필요하고 항상 하나는 비어있어야 한다."}, {"q": "Eden : S0 : S1의 디폴트 비율은?", "opts": ["4:1:1", "8:1:1", "10:1:1", "6:2:2"], "ans": 1, "exp": "<strong>Eden : S0 : S1 = 8 : 1 : 1</strong> (SurvivorRatio=8). Survivor가 작은 것 자체가 '대부분 객체가 금방 죽는다'는 가설을 디폴트 값이 반영하는 증거."}, {"q": "Minor GC가 트리거되는 조건은?", "opts": ["Old Generation이 꽉 찼을 때", "Eden이 가득 차서 새 객체 할당 불가", "Metaspace가 꽉 찼을 때", "JVM 시작 후 1분마다"], "ans": 1, "exp": "<strong>Eden이 가득 차서 새 객체를 할당할 수 없을 때</strong> Minor GC(= Young GC)가 발생. Eden + 현재 Survivor → 비어있는 Survivor로 Mark-Copy 수행."}, {"q": "객체의 age가 증가하는 시점은?", "opts": ["Old Generation으로 이동할 때", "Minor GC(Young GC)를 살아남을 때마다", "매일 자정에", "객체가 처음 생성될 때"], "ans": 1, "exp": "<strong>Minor GC를 살아남을 때마다 age +1</strong>. 객체 헤더에 저장. age가 threshold(기본 15)에 도달하면 Old Generation으로 Promotion."}, {"q": "Forwarding Address의 역할은?", "opts": ["객체의 현재 주소를 담음", "복사된 새 주소를 원래 위치 헤더에 기록 — 중복 복사 방지", "GC Root 위치를 기록", "Promotion된 Old 객체 추적"], "ans": 1, "exp": "Mark-Copy 중 같은 live 객체를 여러 경로로 다시 만났을 때 <strong>중복 복사를 방지</strong>. Forwarding Address가 있으면 '이미 복사됨, 참조만 갱신하면 됨'으로 판단."}, {"q": "Major GC(Full GC)가 Minor GC보다 느린 근본 이유는?", "opts": ["GC 스레드 수가 적어서", "대상이 전체 힙이고 Mark-Sweep-Compact(전체에 비례)를 사용하기 때문", "Young에 객체가 많아서", "네트워크 I/O가 발생해서"], "ans": 1, "exp": "Minor GC: Young만 + Mark-Copy(live에 비례). Full GC: 전체 힙 + <strong>Mark-Sweep-Compact(힙 크기·전체 객체에 비례)</strong>. 알고리즘 자체가 더 비싼 것을 쓴다."}, {"q": "Full GC 트리거 조건이 아닌 것은?", "opts": ["Promotion 실패 (Old에 공간 없음)", "Huge object 할당 실패", "Eden이 꽉 찼을 때", "Young GC 직전 휴리스틱 (Old 공간 부족 예상)"], "ans": 2, "exp": "<strong>Eden이 꽉 차면 Minor GC</strong>가 발생. Full GC는 Promotion 실패, Huge object Old 할당 실패, Young GC 직전 휴리스틱 등이 트리거."}, {"q": "'GC는 사실 Live Collector다'의 의미는?", "opts": ["Garbage를 직접 찾아서 제거", "Garbage가 많을수록 느림", "Live object를 추적·복사하므로 Live object가 많을수록 느림", "Garbage와 Live 모두 동일하게 처리"], "ans": 2, "exp": "알고리즘을 뜯어보면 추적 대상은 <strong>garbage가 아니라 live object</strong>. Live object가 많을수록 오래 걸린다. 이것이 실무에서 로컬 캐시 남용이 GC 성능을 갉아먹는 이유."}, {"q": "Write Barrier의 역할은?", "opts": ["GC 수행 시 앱을 멈추는 것", "Old 객체가 Young을 참조할 때 자동으로 Remembered Set에 등록", "힙 크기를 동적으로 조정", "바이트코드를 검증"], "ans": 1, "exp": "JVM은 참조 대입 시점에 <strong>write barrier(참조를 쓸 때 끼어드는 짧은 코드)</strong>를 통해 Old → Young 참조를 자동으로 Remembered Set에 등록. 개발자가 직접 신경 쓸 일은 없지만 공짜가 아님."}, {"q": "Mark-Copy에서 '옮긴다'는 표현이 부정확한 이유는?", "opts": ["이동이 아니라 삭제이기 때문", "실제로는 복사(Copy)이고 원본은 그대로 남아 free로 표시될 뿐이기 때문", "이동이 아니라 압축이기 때문", "원본이 즉시 0으로 초기화되기 때문"], "ans": 1, "exp": "실제로는 <strong>복사(copy)</strong>. 원본은 그대로 남고 헤더에 Forwarding Address만 적힌다. 원본 위치는 'free로 표시'될 뿐 — 언제든 덮어쓸 수 있는 공간으로 간주."}, {"q": "Survivor 영역이 너무 작으면?", "opts": ["Eden이 빨리 참", "Young GC 후 살아남은 객체가 못 들어가 너무 일찍 Old로 Promotion → Old 빨리 참 → Full GC ↑", "GC가 아예 발생하지 않음", "TLAB refill이 잦아짐"], "ans": 1, "exp": "Survivor가 너무 작으면 <strong>살아남은 객체가 Survivor에 못 들어가 premature promotion</strong>. Old가 빨리 차고 Full GC 빈도가 증가한다."}, {"q": "Full GC 후 Young 영역이 통째로 비워지는 이유는?", "opts": ["Young 객체는 모두 가비지로 판정", "살아남은 Young 객체들이 age 무관하게 모두 Old로 promote되어 Young이 비워짐", "Young 영역을 초기화해서", "GC 버그"], "ans": 1, "exp": "Full GC는 힙 전체 대상. Serial GC 기준으로 <strong>살아남은 Young 객체들은 age 무관하게 전부 Old로 promote</strong>되어 Young 영역이 통째로 비워진다."}, {"q": "로컬 캐시(Caffeine)를 과도하게 사용할 때 GC에 미치는 영향은?", "opts": ["GC가 빨라짐 — 캐시 히트율이 높아서", "캐시된 객체가 항상 reachable이라 GC가 매번 다 추적해야 함 → Full GC 빈도↑, GC 시간↑", "GC가 발생하지 않음", "Young GC가 줄어듦"], "ans": 1, "exp": "캐시된 객체는 항상 reachable → GC가 매번 다 추적해야 함. age가 차서 Old에 쌓임 → <strong>Full GC 빈도↑, 회수되는 메모리는 거의 없음</strong>. '캐시를 무조건 많이'가 GC 성능을 갉아먹을 수 있음."}, {"q": "Young : Old의 디폴트 비율(NewRatio=2)은?", "opts": ["Young 2 : Old 1", "Young 1 : Old 2", "Young 1 : Old 1", "Young 3 : Old 1"], "ans": 1, "exp": "<strong>NewRatio=2 → Old : Young = 2 : 1</strong>. Old를 크게 잡는 이유: Old 부족 시 Full GC가 잦아지고 Full GC는 Mark-Sweep-Compact라 비싸기 때문."}];
+
+let qIdx=0,score=0,answered=false;
+function goTo(id){
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  const qs=document.getElementById('quiz-section');
+  if(id==='quiz'){
+    document.querySelectorAll('.section').forEach(s=>s.style.display='none');
+    qs.style.display='block'; quizStart();
+  } else {
+    qs.style.display='none';
+    document.querySelectorAll('.section').forEach(s=>s.style.display='');
+    const t=document.getElementById(id); if(t)t.classList.add('active');
+  }
+  document.querySelectorAll('.nav-item').forEach(n=>{
+    if((id==='quiz'&&n.textContent.includes('퀴즈'))||n.getAttribute('onclick')?.includes(id))n.classList.add('active');
+  });
+}
+function quizStart(){qIdx=0;score=0;answered=false;document.getElementById('quizMain').style.display='block';document.getElementById('quizResult').classList.remove('show');renderQ();}
+function renderQ(){
+  answered=false;
+  const q=questions[qIdx];
+  document.getElementById('qCount').textContent=`${qIdx+1} / ${questions.length}`;
+  document.getElementById('qProgressFill').style.width=`${(qIdx/questions.length)*100}%`;
+  document.getElementById('qText').textContent=q.q;
+  document.getElementById('qExplanation').className='quiz-explanation';
+  document.getElementById('qNextBtn').style.display='none';
+  const keys=['A','B','C','D'];
+  const c=document.getElementById('qOptions');c.innerHTML='';
+  q.opts.forEach((opt,i)=>{
+    const b=document.createElement('button');b.className='quiz-opt';
+    b.innerHTML=`<span class="opt-key">${keys[i]}</span>${opt}`;
+    b.onclick=()=>selectAnswer(i);c.appendChild(b);
+  });
+}
+function selectAnswer(i){
+  if(answered)return;answered=true;
+  const q=questions[qIdx];
+  const btns=document.querySelectorAll('.quiz-opt');
+  btns.forEach(b=>b.disabled=true);
+  if(i===q.ans){btns[i].classList.add('correct');score++;}
+  else{btns[i].classList.add('wrong');btns[q.ans].classList.add('correct');}
+  const exp=document.getElementById('qExplanation');exp.innerHTML=q.exp;exp.classList.add('show');
+  document.getElementById('qNextBtn').style.display='inline-block';
+  document.getElementById('qNextBtn').textContent=qIdx<questions.length-1?'다음 문제 →':'결과 보기 →';
+}
+function quizNext(){qIdx++;if(qIdx>=questions.length)showResult();else renderQ();}
+function showResult(){
+  document.getElementById('quizMain').style.display='none';
+  const pct=Math.round((score/questions.length)*100);
+  document.getElementById('quizScore').textContent=`${score} / ${questions.length}`;
+  let c='';
+  if(pct>=90)c='완벽합니다 🎉 다음 파트로!';
+  else if(pct>=70)c='잘 하셨어요 👍 틀린 챕터를 복습해보세요.';
+  else if(pct>=50)c='절반 통과 ✨ 핵심 챕터를 한 번 더 읽어보세요.';
+  else c='복습이 필요해요 📖 처음부터 다시 읽어보세요.';
+  document.getElementById('quizComment').textContent=`${pct}% 정답률 — ${c}`;
+  document.getElementById('quizResult').classList.add('show');
+}
+function quizRestart(){quizStart();}
+
+</script>
+</body>
+</html>

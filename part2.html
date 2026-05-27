@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC 2부 — JVM 지식</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav id="sidebar">
+  <a class="nav-home" href="index.html">← 목차로</a>
+  <div class="logo"><div class="tag">GC 2부</div><h1 style="font-family:var(--display);font-size:22px;color:#fff;margin-top:4px;">JVM 지식</h1></div>
+  <nav>
+<div class="nav-item active" onclick="goTo('s0')"><span class="num">00</span> 개요</div>
+<div class="nav-item" onclick="goTo('s1')"><span class="num">01</span> JVM 등장 배경</div>
+<div class="nav-item" onclick="goTo('s2')"><span class="num">02</span> 빌드 파이프라인</div>
+<div class="nav-item" onclick="goTo('s3')"><span class="num">03</span> JDK vs JRE</div>
+<div class="nav-item" onclick="goTo('s4')"><span class="num">04</span> 실행 파일의 정체</div>
+<div class="nav-item" onclick="goTo('s5')"><span class="num">05</span> 프로세스 시작 흐름</div>
+<div class="nav-item" onclick="goTo('s6')"><span class="num">06</span> 스레드 1:1:1 매핑</div>
+<div class="nav-item" onclick="goTo('s7')"><span class="num">07</span> 바이트코드 실행 방식</div>
+<div class="nav-item" onclick="goTo('s8')"><span class="num">08</span> 클래스 로딩 & Metaspace</div>
+<div class="nav-item" onclick="goTo('s9')"><span class="num">09</span> JVM 가상 주소 공간</div>
+    <div class="nav-item" onclick="goTo('quiz')" style="margin-top:10px;border-top:1px solid var(--border);padding-top:14px;"><span class="num">🧪</span> 퀴즈 (20문제)</div>
+  </nav>
+</nav>
+<main id="main">
+<div class="section active" id="s0">
+  <div class="section-header"><div class="chip">GC 2부 — JVM 지식</div><h2>GC 공부를 위해<br>알아야 할 JVM 지식</h2><p>JVM이 어떻게 동작하는지 모르면 GC가 어디서 무엇을 수거하는지 알 수 없다.</p></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+    <div class="card" style="border-color:rgba(0,212,255,.3);"><h3>WORA</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">Write Once, Run Anywhere — JAR 하나로 어느 환경에서나</p></div>
+    <div class="card" style="border-color:rgba(245,158,11,.3);"><h3>JIT</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">핫스팟 감지 → 기계어 컴파일 → Code Cache 저장</p></div>
+    <div class="card" style="border-color:rgba(16,185,129,.3);"><h3>JVM Heap</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">GC가 실제로 동작하는 영역. 자바 객체·배열이 여기에</p></div>
+  </div>
+</div>
+<div class="section" id="s1">
+  <div class="section-header"><div class="chip">Chapter 01</div><h2>JVM은 왜<br>등장했나</h2><p>Platform Dependency 문제 — 환경마다 따로 컴파일해야 했던 시절.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>문제 — 환경 조합마다 별도 빌드</h3>
+    <table class="data-table"><thead><tr><th>OS / CPU</th><th>Intel</th><th>ARM</th></tr></thead>
+    <tbody><tr><td>Linux</td><td>컴파일 1</td><td>컴파일 2</td></tr><tr><td>Windows</td><td>컴파일 3</td><td>컴파일 4</td></tr></tbody></table>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">OS마다 시스템 콜 함수 모양이 다르고, CPU마다 ISA가 다름. 기능 추가·버그 수정마다 N번씩 빌드.</div></div>
+  <div class="card"><h3>해결 — Write Once, Run Anywhere (WORA)</h3>
+    <div class="code-block">소스코드 → [한 번만 빌드] → app.jar → 어떤 환경에서든 JVM이 실행
+
+각 환경에 JVM만 한 번 설치하면 같은 JAR를 그대로 실행 가능.</div>
+    <div class="info-box green" style="margin-bottom:0;">🔑 JVM이 OS·CPU 차이를 추상화하는 중간 계층 역할을 한다.</div></div>
+</div>
+<div class="section" id="s2">
+  <div class="section-header"><div class="chip">Chapter 02</div><h2>빌드 파이프라인</h2><p>Compile → Package → Run 단계별 흐름.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>단계별 흐름</h3>
+    <div class="code-block">*.java --[javac]--> *.class (바이트코드)
+              ↓
+    [jar cvf app.jar -e Main *.class]
+              ↓
+           app.jar (특수한 형태의 ZIP)
+              ↓
+       [java -jar app.jar]
+              ↓
+        JVM 프로세스 실행</div></div>
+  <div class="card"><h3>주요 명령어</h3>
+    <table class="data-table"><thead><tr><th>도구</th><th>역할</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">javac</td><td>자바 소스 → 바이트코드(.class) 컴파일</td></tr>
+      <tr><td class="highlight">jar</td><td>.class들을 .jar로 패키징 (엔트리 포인트 명시)</td></tr>
+      <tr><td class="highlight">java</td><td>JVM 실행 파일 — JAR를 입력받아 실행</td></tr>
+    </tbody></table>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">컴파일의 현대적 정의: 한 언어에서 다른 언어로의 변환. 자바 소스 → 바이트코드도 컴파일이다.</div></div>
+</div>
+<div class="section" id="s3">
+  <div class="section-header"><div class="chip">Chapter 03</div><h2>JDK vs JRE</h2><p>Java 11부터 공식 JRE 배포가 중단됐다.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>역사 변화</h3>
+    <table class="data-table"><thead><tr><th>시점</th><th>JDK</th><th>JRE</th></tr></thead>
+    <tbody>
+      <tr><td>~Java 10</td><td>개발+실행 (공식 배포)</td><td>실행만 (공식 배포)</td></tr>
+      <tr><td class="highlight">Java 11~</td><td>공식 배포는 JDK뿐</td><td><span style="color:var(--danger);">공식 중단</span> — jlink로 커스텀 생성 가능</td></tr>
+    </tbody></table></div>
+  <div class="card"><h3>오늘날 JVM 실행 환경 셋업</h3>
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <div style="display:flex;gap:12px;padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><span style="color:var(--accent);font-family:var(--mono);font-size:11px;font-weight:700;min-width:16px;">A</span><span><strong>JDK 설치</strong> — 가장 일반적</span></div>
+      <div style="display:flex;gap:12px;padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><span style="color:var(--accent);font-family:var(--mono);font-size:11px;font-weight:700;min-width:16px;">B</span><span><strong>OS 패키지 매니저</strong> — Homebrew, apt 등</span></div>
+      <div style="display:flex;gap:12px;padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><span style="color:var(--accent);font-family:var(--mono);font-size:11px;font-weight:700;min-width:16px;">C</span><span><strong>Docker JRE-like 이미지</strong> — Amazon Corretto headless 등</span></div>
+    </div></div>
+</div>
+<div class="section" id="s4">
+  <div class="section-header"><div class="chip">Chapter 04</div><h2>실행 파일의 정체</h2><p>jar가 아니라 java가 진짜 실행 파일이다.</p></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;">
+    <div class="card" style="border-color:rgba(239,68,68,.3);"><h3 style="color:var(--danger);">❌ 흔한 오해</h3>
+      <p style="font-size:13px;color:var(--text-dim);line-height:1.7;">"JAR 파일이 실행 파일 아닌가?"<br><br>아니다. JAR는 그냥 <strong style="color:var(--text);">ZIP(특수 포맷)</strong>.</p></div>
+    <div class="card" style="border-color:rgba(16,185,129,.3);"><h3 style="color:var(--accent3);">✓ 실제 실행 파일</h3>
+      <div class="code-block" style="margin-bottom:8px;">$JAVA_HOME/bin/java</div>
+      <p style="font-size:13px;color:var(--text-dim);line-height:1.7;">OS가 실행하는 진짜 실행 파일. 내부에서 JVM을 런칭한다.</p></div>
+  </div>
+  <div class="info-box green"><strong>자바 프로세스 ≡ JVM 프로세스</strong> (같은 말)</div>
+</div>
+<div class="section" id="s5">
+  <div class="section-header"><div class="chip">Chapter 05</div><h2>프로세스 시작 흐름</h2><p>java 실행 파일이 main 메서드까지 도달하는 과정.</p></div>
+  <div class="card"><h3>JDK 소스 코드 추적</h3>
+    <div class="code-block">[java 실행 파일의 OS-level main()]
+  ↓
+JLI_Launch(...)
+  ↓
+CallJavaMainInNewThread(...)
+  ↓
+pthread_create(...)  ← OS 스레드 생성
+  ↓
+JavaMain(...)  ← 새 OS 스레드에서 실행 시작
+  ├─ InitializeJVM() → CreateJavaVM()
+  │    → 새 JavaThread(C++ 객체) + java.lang.Thread 객체 (1:1 매핑)
+  ├─ LoadMainClass()  ← Metaspace에 메인 클래스 로딩
+  └─ CallStaticMainMethod()  ← 우리가 작성한 main 메서드 호출!</div>
+    <div class="info-box purple">🔑 pthread_create 호출 시점에 새 OS 스레드 생성. main 메서드는 새 스레드에서 실행된다.</div></div>
+</div>
+<div class="section" id="s6">
+  <div class="section-header"><div class="chip">Chapter 06</div><h2>스레드 1:1:1 매핑</h2><p>자바 스레드 스케줄링은 결국 OS 커널이 한다.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>3계층 매핑 구조</h3>
+    <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:14px;">
+      <div style="padding:13px 16px;border:1px solid rgba(0,212,255,.3);border-radius:4px;background:rgba(0,212,255,.05);"><div style="font-family:var(--mono);font-size:10px;color:var(--accent);">JAVA LAYER</div><div style="font-size:14px;font-weight:700;">java.lang.Thread</div></div>
+      <div style="text-align:center;font-family:var(--mono);font-size:11px;color:var(--text-muted);">↕ 1:1</div>
+      <div style="padding:13px 16px;border:1px solid rgba(124,58,237,.3);border-radius:4px;background:rgba(124,58,237,.05);"><div style="font-family:var(--mono);font-size:10px;color:var(--accent2);">JVM LAYER</div><div style="font-size:14px;font-weight:700;">JavaThread (C++ 객체)</div></div>
+      <div style="text-align:center;font-family:var(--mono);font-size:11px;color:var(--text-muted);">↕ 1:1</div>
+      <div style="padding:13px 16px;border:1px solid rgba(16,185,129,.3);border-radius:4px;background:rgba(16,185,129,.05);"><div style="font-family:var(--mono);font-size:10px;color:var(--accent3);">OS LAYER</div><div style="font-size:14px;font-weight:700;">OS Thread (pthread)</div></div>
+    </div>
+    <div class="info-box" style="margin-bottom:0;">자바 스레드 스케줄링 = 결국 OS 커널이 담당. Virtual Thread는 이 매핑에서 벗어난 별개의 메커니즘.</div></div>
+  <div class="card"><h3>new Thread() vs start()</h3>
+    <table class="data-table"><thead><tr><th>호출</th><th>결과</th></tr></thead>
+    <tbody>
+      <tr><td class="code">new Thread()</td><td>Java 객체만 생성. OS 스레드 없음</td></tr>
+      <tr><td class="code highlight">start()</td><td>OS 스레드 + JavaThread 새로 생성. 실행 가능 상태</td></tr>
+    </tbody></table></div>
+</div>
+<div class="section" id="s7">
+  <div class="section-header"><div class="chip">Chapter 07</div><h2>바이트코드 실행 방식<br>(Hybrid)</h2><p>인터프리터 + JIT 컴파일러를 함께 쓰는 이유.</p></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;">
+    <div class="card" style="border-color:rgba(0,212,255,.25);"><h3>인터프리터 (기본)</h3>
+      <p style="font-size:13px;color:var(--text-dim);line-height:1.7;margin-bottom:10px;">바이트코드를 한 줄씩 해석 → 내부 C 함수 호출. CPU는 바이트코드를 모른다. JVM이 "대신 실행".</p></div>
+    <div class="card" style="border-color:rgba(245,158,11,.3);"><h3 style="color:var(--accent4);">JIT 컴파일러</h3>
+      <p style="font-size:13px;color:var(--text-dim);line-height:1.7;margin-bottom:10px;">핫스팟 감지 → 기계어 블록 컴파일 → Code Cache 저장 → 이후 CPU 직접 실행. 성능 대폭 향상.</p></div>
+  </div>
+  <div class="card"><h3>Tiered Compilation — 5단계</h3>
+    <table class="data-table"><thead><tr><th>레벨</th><th>동작</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">0</td><td>Interpreter</td></tr>
+      <tr><td class="highlight">1~3</td><td>C1 (Client Compiler) — 빠른 컴파일, 낮은 최적화</td></tr>
+      <tr><td class="highlight">4</td><td><strong style="color:var(--accent4);">C2 (Server Compiler)</strong> — 느린 컴파일, 최고 수준 최적화</td></tr>
+    </tbody></table></div>
+</div>
+<div class="section" id="s8">
+  <div class="section-header"><div class="chip">Chapter 08</div><h2>클래스 로딩 &<br>Metaspace</h2><p>필요한 시점에만 올리는 Lazy Loading과 Warm-up의 필요성.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Lazy Loading 흐름</h3>
+    <div class="code-block">바이트코드 실행 중 → "ArrayList 처음 등장"
+  → Metaspace에 있나? → NO
+  → lib/modules에서 ArrayList 클래스 정보 읽어옴
+  → Klass 객체 생성 → Metaspace에 저장
+  → java.lang.Class 객체도 함께 생성 (JVM Heap에)
+  → 다음 호출부터는 Metaspace에서 즉시 사용</div></div>
+  <div class="card" style="margin-bottom:16px;"><h3>로딩 시 만들어지는 두 객체 (1:1 매핑)</h3>
+    <table class="data-table"><thead><tr><th>객체</th><th>위치</th><th>용도</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">Klass</td><td>Metaspace</td><td>필드/메서드/상속/바이트코드 등 메타정보 (C++ 객체)</td></tr>
+      <tr><td class="highlight">java.lang.Class</td><td>JVM Heap</td><td>자바 코드에서 Shop.class / 리플렉션으로 접근</td></tr>
+    </tbody></table></div>
+  <div class="info-box yellow">⚠️ <strong>Warm-up 필요</strong>: 새로 띄운 JVM은 클래스가 없고 JIT도 미완료 상태. 트래픽이 갑자기 몰리면 SSD까지 내려가서 클래스 로딩 → 느림. 배포 후 웜업 후 트래픽 투입이 표준 운영 기법.</div>
+</div>
+<div class="section" id="s9">
+  <div class="section-header"><div class="chip">Chapter 09</div><h2>JVM 가상 주소 공간</h2><p>JVM도 OS 입장에서는 그냥 프로세스 하나. 1부 개념이 그대로 적용된다.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>주요 영역</h3>
+    <table class="data-table"><thead><tr><th>영역</th><th>위치</th><th>저장 내용</th></tr></thead>
+    <tbody>
+      <tr><td><span style="color:var(--accent);font-weight:700;">JVM Heap</span></td><td>JVM 내부</td><td>자바 객체·배열·java.lang.Thread·java.lang.Class → <strong>GC 대상!</strong></td></tr>
+      <tr><td><span style="color:var(--accent2);font-weight:700;">Metaspace</span></td><td>Native Memory</td><td>클래스 메타정보 + Klass 객체 (JVM Spec: Method Area)</td></tr>
+      <tr><td><span style="color:var(--accent4);font-weight:700;">Code Cache</span></td><td>Native Memory</td><td>JIT 컴파일된 기계어 블록</td></tr>
+      <tr><td>Stack</td><td>스레드별</td><td>자바 스레드 스택 = OS 스레드 스택 그대로</td></tr>
+      <tr><td>Native Memory</td><td>JVM Heap 제외 전부</td><td>Metaspace + Code Cache + Stack + Native Libs 등</td></tr>
+    </tbody></table></div>
+  <div class="info-box green">🎯 <strong>GC 동작 영역 = JVM Heap</strong>. PermGen(Java 7 이하) → Metaspace(Java 8+)로 이동. -XX:MaxPermSize → -XX:MaxMetaspaceSize.</div>
+</div>
+<div id="quiz-section" style="display:none;">
+  <div class="section-header"><div class="chip">퀴즈</div><h2>실력 확인 — 20문제</h2><p>2부 핵심 개념 점검.</p></div>
+  <div id="quizMain">
+    <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="qProgressFill" style="width:0%"></div></div>
+    <div class="quiz-q-count" id="qCount">1 / 20</div>
+    <div class="quiz-question" id="qText"></div>
+    <div class="quiz-options" id="qOptions"></div>
+    <div class="quiz-explanation" id="qExplanation"></div>
+    <button class="btn btn-primary" id="qNextBtn" style="display:none;" onclick="quizNext()">다음 문제 →</button>
+  </div>
+  <div class="quiz-result" id="quizResult">
+    <div class="score-num" id="quizScore"></div>
+    <p id="quizComment"></p>
+    <button class="btn btn-ghost" style="margin-top:24px;" onclick="quizRestart()">다시 풀기</button>
+  </div>
+</div>
+</main>
+<script>
+const questions = [{"q": "JVM이 등장한 핵심 이유는?", "opts": ["성능 향상", "플랫폼 의존성 문제 해결 (WORA)", "보안 강화", "메모리 자동 관리"], "ans": 1, "exp": "<strong>WORA(Write Once, Run Anywhere)</strong>: 환경마다 따로 컴파일해야 했던 문제를 해결. JAR 하나로 JVM이 설치된 어느 환경에서나 실행 가능."}, {"q": "자바 바이트코드를 생성하는 명령어는?", "opts": ["java", "jar", "javac", "javap"], "ans": 2, "exp": "<strong>javac</strong>가 .java 소스코드를 .class(바이트코드)로 컴파일한다. java는 JVM 실행, jar는 패키징 도구."}, {"q": "JAR 파일에 대한 올바른 설명은?", "opts": ["OS가 직접 실행하는 실행 파일", "ZIP 변종으로 .class 파일들을 묶은 것", "컴파일된 기계어가 담긴 파일", "JVM 자체를 담은 파일"], "ans": 1, "exp": "JAR는 <strong>ZIP 특수 포맷</strong>. 확장자를 .zip으로 바꾸면 압축이 풀린다. 실제 실행 파일은 $JAVA_HOME/bin/java."}, {"q": "Java 11부터 JRE 공식 배포가 중단된 이유와 대안은?", "opts": ["JRE가 불필요해짐 — 대안 없음", "jlink로 커스텀 JRE 생성 가능", "JDK가 JRE를 완전히 대체", "JVM이 사라짐"], "ans": 1, "exp": "Java 11부터 Oracle은 JRE 공식 배포를 중단. <strong>jlink</strong>로 필요한 모듈만 담은 커스텀 JRE를 만들 수 있다."}, {"q": "자바 프로세스와 JVM 프로세스의 관계는?", "opts": ["서로 다른 별개의 프로세스", "JVM 프로세스가 자바 프로세스를 내부에서 실행", "자바 프로세스 ≡ JVM 프로세스 (같은 것)", "자바 프로세스가 JVM을 포함"], "ans": 2, "exp": "<strong>java(실행 파일)가 실행되면서 내부에서 JVM을 런칭</strong>하므로 자바 프로세스와 JVM 프로세스는 동일한 프로세스다."}, {"q": "JVM 프로세스 시작 시 main 메서드가 실행되는 스레드는?", "opts": ["java 실행 파일의 메인 스레드에서 직접", "pthread_create로 새로 생성된 OS 스레드에서", "기존에 있던 OS 스레드에서", "JVM 내부 GC 스레드에서"], "ans": 1, "exp": "JLI_Launch → CallJavaMainInNewThread → <strong>pthread_create</strong>로 새 OS 스레드가 생성되고, 그 스레드에서 JavaMain()이 실행되며 main 메서드가 호출된다."}, {"q": "java.lang.Thread 객체만 생성(new)하고 start()를 호출하지 않으면?", "opts": ["OS 스레드와 JavaThread가 생성됨", "Java 객체만 생성, OS 스레드 없음", "에러 발생", "JVM이 자동으로 실행"], "ans": 1, "exp": "<strong>start() 호출 시점에</strong> OS 스레드와 JavaThread가 생성된다. new Thread()만 하면 Java 객체만 힙에 생성될 뿐 OS 레벨의 스레드는 존재하지 않는다."}, {"q": "스레드 3종 1:1:1 매핑의 올바른 순서는?", "opts": ["OS Thread ↔ JavaThread ↔ java.lang.Thread", "java.lang.Thread ↔ JavaThread ↔ OS Thread", "JavaThread ↔ OS Thread ↔ java.lang.Thread", "모두 독립적"], "ans": 1, "exp": "<strong>java.lang.Thread (Java 객체) ↔ JavaThread (JVM C++ 객체) ↔ OS Thread (커널 관리)</strong>로 1:1:1 매핑. 자바 스레드 스케줄링은 결국 OS 커널이 담당한다."}, {"q": "인터프리터 방식에서 CPU가 실행하는 것은?", "opts": ["바이트코드 명령어를 직접", "JVM이 미리 컴파일해둔 C 함수", "자바 소스코드", "기계어로 된 바이트코드"], "ans": 1, "exp": "CPU는 바이트코드를 모른다. 인터프리터가 바이트코드를 해석해서 <strong>JVM 내부에 미리 컴파일된 C 함수</strong>를 호출하는 방식이다."}, {"q": "JIT 컴파일러가 핫스팟을 감지한 후 저장하는 곳은?", "opts": ["JVM Heap", "Metaspace", "Code Cache", "Stack"], "ans": 2, "exp": "JIT 컴파일된 기계어 블록은 <strong>Code Cache</strong>에 저장된다. 이후 호출에서는 인터프리터를 거치지 않고 Code Cache로 점프해 CPU에서 직접 실행한다."}, {"q": "Tiered Compilation에서 C2 컴파일러의 특징은?", "opts": ["빠른 컴파일, 낮은 최적화", "느린 컴파일, 최고 수준 최적화", "인터프리터와 동일", "GC 전용 컴파일러"], "ans": 1, "exp": "<strong>C2 (Server Compiler, Level 4)</strong>: 느린 컴파일이지만 최고 수준의 최적화를 제공. 서버 환경처럼 장기 실행 환경에서 유리."}, {"q": "JVM Lazy Loading에 대한 올바른 설명은?", "opts": ["JVM 시작 시 모든 클래스를 미리 로딩", "처음 사용되는 시점에 클래스를 Metaspace에 로딩", "클래스를 절대 미리 로딩하지 않음", "GC 수행 시에만 클래스 로딩"], "ans": 1, "exp": "<strong>Lazy Loading</strong>: 부트스트랩 클래스를 제외하고 실제 사용되는 시점에 처음 로딩. 성능·메모리 절약 목적. 단점은 콜드 스타트 시 느릴 수 있어 Warm-up이 필요."}, {"q": "클래스 로딩 시 만들어지는 두 객체의 위치는?", "opts": ["둘 다 JVM Heap", "Klass → JVM Heap, java.lang.Class → Metaspace", "Klass → Metaspace, java.lang.Class → JVM Heap", "둘 다 Metaspace"], "ans": 2, "exp": "<strong>Klass (C++ 객체) → Metaspace</strong>에 메타정보 저장. <strong>java.lang.Class (Java 객체) → JVM Heap</strong>에 생성되어 리플렉션 등에서 접근 가능."}, {"q": "JVM에서 Warm-up이 필요한 이유는?", "opts": ["JVM 힙 초기화에 시간이 걸려서", "클래스 Lazy Loading 및 JIT 컴파일 미완료 상태로 트래픽이 몰리면 느려서", "OS 스레드 생성 비용 때문에", "GC가 활성화되지 않아서"], "ans": 1, "exp": "새로 띄운 JVM은 Metaspace에 클래스가 없고 JIT 컴파일도 안 된 상태. 트래픽이 갑자기 몰리면 <strong>SSD까지 클래스를 로딩</strong>하고 인터프리터로 실행되어 매우 느림. Warm-up으로 이를 예방."}, {"q": "GC가 실제로 동작하는 영역은?", "opts": ["Metaspace", "Code Cache", "JVM Heap", "Stack"], "ans": 2, "exp": "<strong>JVM Heap (= Java Heap)</strong>이 GC의 동작 영역. 자바 객체·배열·java.lang.Thread·java.lang.Class 객체가 여기에 생성되고, GC가 도달 불가능한 객체를 수거한다."}, {"q": "Native Memory란?", "opts": ["JVM Heap과 Metaspace를 합친 것", "JVM Heap을 제외한 JVM이 사용하는 메모리 전부", "OS가 직접 관리하는 물리 메모리", "스택 메모리만을 의미"], "ans": 1, "exp": "<strong>Native Memory = JVM Heap을 제외한 나머지 전부</strong>: Metaspace, Code Cache, Stack, Native Libraries 등. JVM Heap과 Native Memory를 합친 것이 전체 JVM 프로세스 메모리 사용량."}, {"q": "HotSpot VM의 이름이 'HotSpot'인 이유는?", "opts": ["메모리를 뜨겁게 만들어서", "자주 실행되는 핫스팟 코드를 JIT로 집중 최적화해서", "GC가 핫하게 동작해서", "Java가 Hot하게 유행해서"], "ans": 1, "exp": "<strong>HotSpot</strong>은 자주 실행되는 코드(핫스팟)를 감지해서 JIT 컴파일로 집중 최적화하는 JVM 구현체. 인터프리터와 JIT를 하이브리드로 운영한다."}, {"q": "java.lang.Class 객체가 저장되는 위치와 역할은?", "opts": ["Metaspace — 바이트코드 저장", "JVM Heap — 리플렉션 등에서 접근하는 클래스 표현 객체", "Code Cache — JIT 컴파일 결과", "Stack — 메서드 호출 정보"], "ans": 1, "exp": "<strong>java.lang.Class</strong>는 JVM Heap에 생성되는 자바 객체. Shop.class 표현식이나 리플렉션으로 접근. 내부에서 Metaspace의 Klass를 가리킨다."}, {"q": "JVM Spec 용어 'Method Area'의 HotSpot 구현체 이름은?", "opts": ["PermGen (Java 7까지)", "Metaspace (Java 8+)", "Heap", "Code Cache"], "ans": 1, "exp": "Java 7까지는 Heap 내부 영역인 <strong>PermGen</strong>으로 구현되었으나 OOM이 잦아 Java 8부터 Native Memory의 <strong>Metaspace</strong>로 이동. -XX:MaxPermSize → -XX:MaxMetaspaceSize."}, {"q": "자바 스레드 스케줄링을 최종적으로 담당하는 것은?", "opts": ["JVM 내부 스케줄러", "java.lang.Thread 자체", "OS 커널", "JavaThread 객체"], "ans": 2, "exp": "java.lang.Thread ↔ JavaThread ↔ <strong>OS Thread</strong> 1:1:1 매핑이므로 자바 스레드의 실제 스케줄링은 <strong>OS 커널</strong>이 담당한다. CPU 코어의 실제 실행 단위는 OS 스레드."}];
+
+let qIdx=0,score=0,answered=false;
+function goTo(id){
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  const qs=document.getElementById('quiz-section');
+  if(id==='quiz'){
+    document.querySelectorAll('.section').forEach(s=>s.style.display='none');
+    qs.style.display='block'; quizStart();
+  } else {
+    qs.style.display='none';
+    document.querySelectorAll('.section').forEach(s=>s.style.display='');
+    const t=document.getElementById(id); if(t)t.classList.add('active');
+  }
+  document.querySelectorAll('.nav-item').forEach(n=>{
+    if((id==='quiz'&&n.textContent.includes('퀴즈'))||n.getAttribute('onclick')?.includes(id))n.classList.add('active');
+  });
+}
+function quizStart(){qIdx=0;score=0;answered=false;document.getElementById('quizMain').style.display='block';document.getElementById('quizResult').classList.remove('show');renderQ();}
+function renderQ(){
+  answered=false;
+  const q=questions[qIdx];
+  document.getElementById('qCount').textContent=`${qIdx+1} / ${questions.length}`;
+  document.getElementById('qProgressFill').style.width=`${(qIdx/questions.length)*100}%`;
+  document.getElementById('qText').textContent=q.q;
+  document.getElementById('qExplanation').className='quiz-explanation';
+  document.getElementById('qNextBtn').style.display='none';
+  const keys=['A','B','C','D'];
+  const c=document.getElementById('qOptions');c.innerHTML='';
+  q.opts.forEach((opt,i)=>{
+    const b=document.createElement('button');b.className='quiz-opt';
+    b.innerHTML=`<span class="opt-key">${keys[i]}</span>${opt}`;
+    b.onclick=()=>selectAnswer(i);c.appendChild(b);
+  });
+}
+function selectAnswer(i){
+  if(answered)return;answered=true;
+  const q=questions[qIdx];
+  const btns=document.querySelectorAll('.quiz-opt');
+  btns.forEach(b=>b.disabled=true);
+  if(i===q.ans){btns[i].classList.add('correct');score++;}
+  else{btns[i].classList.add('wrong');btns[q.ans].classList.add('correct');}
+  const exp=document.getElementById('qExplanation');exp.innerHTML=q.exp;exp.classList.add('show');
+  document.getElementById('qNextBtn').style.display='inline-block';
+  document.getElementById('qNextBtn').textContent=qIdx<questions.length-1?'다음 문제 →':'결과 보기 →';
+}
+function quizNext(){qIdx++;if(qIdx>=questions.length)showResult();else renderQ();}
+function showResult(){
+  document.getElementById('quizMain').style.display='none';
+  const pct=Math.round((score/questions.length)*100);
+  document.getElementById('quizScore').textContent=`${score} / ${questions.length}`;
+  let c='';
+  if(pct>=90)c='완벽합니다 🎉 다음 파트로!';
+  else if(pct>=70)c='잘 하셨어요 👍 틀린 챕터를 복습해보세요.';
+  else if(pct>=50)c='절반 통과 ✨ 핵심 챕터를 한 번 더 읽어보세요.';
+  else c='복습이 필요해요 📖 처음부터 다시 읽어보세요.';
+  document.getElementById('quizComment').textContent=`${pct}% 정답률 — ${c}`;
+  document.getElementById('quizResult').classList.add('show');
+}
+function quizRestart(){quizStart();}
+
+</script>
+</body>
+</html>

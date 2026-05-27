@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC 11부 — G1GC 추가 정리</title><link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet"><link rel="stylesheet" href="style.css"></head>
+<body>
+<div id="sidebar">
+  <a class="nav-home" href="index.html">← 목차로</a>
+  <div class="logo"><div class="tag">GC 11부</div><h1>G1GC 추가 정리</h1></div>
+  <nav>
+    <div class="nav-item active" onclick="goTo('s0')"><span class="num">00</span> 한 줄 요약</div>
+    <div class="nav-item" onclick="goTo('s1')"><span class="num">01</span> G1GC 6가지 특징</div>
+    <div class="nav-item" onclick="goTo('s2')"><span class="num">02</span> Humongous Object</div>
+    <div class="nav-item" onclick="goTo('s3')"><span class="num">03</span> Evacuation Failure</div>
+    <div class="nav-item" onclick="goTo('s4')"><span class="num">04</span> Full GC</div>
+    <div class="nav-item" onclick="goTo('s5')"><span class="num">05</span> Collection Set</div>
+    <div class="nav-item" onclick="goTo('s6')"><span class="num">06</span> GC Process 전체 흐름</div>
+    <div class="nav-item" onclick="goTo('s7')"><span class="num">07</span> 면접 포인트</div>
+    <div class="nav-item" onclick="goTo('quiz')" style="margin-top:10px;border-top:1px solid var(--border);padding-top:14px;"><span class="num">🧪</span> 퀴즈 (20문제)</div>
+  </nav>
+</div>
+<main id="main">
+<div class="section active" id="s0">
+  <div class="section-header"><div class="chip">Chapter 00</div><h2>한 줄 요약</h2></div>
+  <div class="info-box" style="font-size:14px;line-height:1.8;"><strong>Humongous Object</strong>는 리전 절반 이상을 차지하는 거대 객체로 올드로 분류되지만 Eager Reclamation 대상이면 영GC에서도 회수 가능(전통적으로 prim 배열 한정, 최근 JDK에서 확장). <strong>Evacuation Failure</strong>는 GC 중 대피 실패(공간부족·핀드객체)로, 실패한 영리전은 즉시 올드로 승격. <strong>Full GC</strong>는 2단계 마크-스윕-콤팩트(1차는 휴몽고스 고정, 2차에서 휴몽고스도 이동)로 동작하며(JDK 10부터 parallel) 둘 다 실패하면 OOM. <strong>Collection Set Candidate Region</strong>은 (a) 컨커런트 마킹으로 가비지 많은 올드 리전 선별, (b) Evacuation Failure를 경험한 리전 두 경로로 들어간다.</div>
+  <div class="card" style="margin-top:20px;">
+    <h3>G1GC 정체성: Balanced Collector</h3>
+    <div class="info-box green">G1 = Parallel GC의 High Throughput + MaxPauseTimeGoal 높은 확률 충족</div>
+    <div class="table-wrap" style="margin-top:8px;"><table class="data-table"><thead><tr><th>보장</th><th>메커니즘</th></tr></thead><tbody>
+      <tr><td class="highlight">High Throughput</td><td>GC 스레드 다수 병렬 동작 + <strong>Garbage First</strong> (가비지 많은 올드 리전 우선)</td></tr>
+      <tr><td class="highlight">MaxPauseTimeGoal</td><td>이전 GC 사이클의 통계로 <strong>휴리스틱하게 다음 영 제너레이션 크기 역산</strong></td></tr>
+    </tbody></table></div>
+    <div class="info-box yellow" style="margin-top:8px;">G1GC는 <strong>Real-time Collector가 아님</strong>. "높은 확률로" MaxPauseTimeGoal 충족. 예측 실패 또는 Full GC 발생 시 못 맞춤.</div>
+  </div>
+</div>
+<div class="section" id="s1">
+  <div class="section-header"><div class="chip">Chapter 01</div><h2>G1GC 6가지 특징 키워드</h2></div>
+  <div class="card">
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>특징</th><th>의미</th><th>Serial/Parallel GC와의 차이</th></tr></thead><tbody>
+      <tr><td class="highlight">Generational</td><td>Young / Old 구분</td><td>연속된 공간이 아님 — 리전 단위, 흩어져 있을 수 있음</td></tr>
+      <tr><td class="highlight">Incremental</td><td>올드를 한 번에 수집 안 함</td><td>가비지 많은 올드 리전만 골라서, 영GC에 숟가락 얹어 조금씩 수집</td></tr>
+      <tr><td class="highlight">Parallel</td><td>GC 스레드 다수</td><td>멀티코어 활용</td></tr>
+      <tr><td class="highlight">Mostly Concurrent</td><td>마킹 과정은 대부분 뮤테이터와 동시</td><td>YGC/Mixed GC는 전부 STW</td></tr>
+      <tr><td class="highlight">Stop-the-World</td><td>YGC, Mixed GC, Full GC + Remark/Cleanup 단계</td><td>—</td></tr>
+      <tr><td class="highlight">Evacuating</td><td>살아있는 객체를 다른 리전으로 복사</td><td>YGC/Mixed GC는 복사 방식. Full GC만 Mark-Sweep-Compact</td></tr>
+    </tbody></table></div>
+    <div class="info-box purple">면접 포인트: "Parallel = GC 스레드 여러 개", "Concurrent = GC 스레드가 애플리케이션 스레드와 동시 실행". 매번 헷갈리는 포인트.</div>
+  </div>
+</div>
+<div class="section" id="s2">
+  <div class="section-header"><div class="chip purple">Chapter 02</div><h2>Humongous Object (거대 객체)</h2></div>
+  <div class="card">
+    <h3>정의 &amp; 분류</h3>
+    <div class="info-box green"><strong>리전 사이즈의 절반 이상</strong>을 차지하는 객체 = Humongous Object. 이 객체가 들어가는 리전을 Humongous Region이라 부른다.</div>
+    <div class="info-box red" style="margin-top:8px;">[중요] Humongous Object는 기본적으로 <strong>Old Generation으로 분류</strong>된다. → 영GC에서는 원칙적으로 회수 대상 아님.</div>
+  </div>
+  <div class="card">
+    <h3>배치 방식</h3>
+    <div class="code-block">케이스 A: 한 리전에 들어가는 경우 (리전 사이즈의 50~100%)
+┌──────┬──────┬──────┐
+│  ... │  Hum │  ... │    ← 남는 공간 그냥 버림 (사용 안 함)
+└──────┴──────┴──────┘
+
+케이스 B: 한 리전보다 큰 경우 → 연속된 free 리전들에 할당
+┌──────┬──────┬──────┬──────┐
+│ Hum  │ Hum  │Hum/짜│  X  │    ← 짜투리 공간은 버림
+└──────┴──────┴──────┴──────┘
+회수 시: 그냥 N개 리전을 한 번에 free로 돌리면 끝</div>
+  </div>
+  <div class="card">
+    <h3>IHOP 체크 타이밍</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>객체 유형</th><th>IHOP 체크 시점</th></tr></thead><tbody>
+      <tr><td>일반 객체</td><td>영GC 끝나는 시점</td></tr>
+      <tr><td class="highlight">거대 객체</td><td><strong>할당 때마다 즉시</strong> (사이즈가 커서 메모리를 빠르게 고갈시킬 수 있음)</td></tr>
+    </tbody></table></div>
+  </div>
+  <div class="card">
+    <h3>Humongous Object 회수 타이밍</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>회수 시점</th><th>조건</th></tr></thead><tbody>
+      <tr><td class="highlight">Remark 단계</td><td>일반적인 회수 경로</td></tr>
+      <tr><td class="highlight">Full GC</td><td>최후의 수단</td></tr>
+      <tr><td class="highlight">영GC 중 Eager Reclamation</td><td><strong>Primitive 타입 배열인 거대 객체에 한해</strong> (최근 JDK에서 레퍼런스 배열까지 확장)</td></tr>
+    </tbody></table></div>
+    <div class="info-box">자주 헷갈리는 포인트: "영GC는 항상 영객체만 회수하나요?" → 기본은 맞지만, <strong>프리미티브 배열인 거대 객체가 있다면 영GC에서도 회수될 수 있다</strong>가 정확한 답.</div>
+  </div>
+</div>
+<div class="section" id="s3">
+  <div class="section-header"><div class="chip yellow">Chapter 03</div><h2>Evacuation Failure (대피 실패)</h2></div>
+  <div class="card">
+    <h3>정의 &amp; 두 가지 원인</h3>
+    <div class="info-box">GC 도중(YGC 또는 Mixed GC), 살아있는 객체를 다른 리전으로 옮기지 못한 상황. Full GC는 해당 없음 (Mark-Sweep-Compact 방식이라 evacuation 개념 자체가 없음).</div>
+    <div class="table-wrap" style="margin-top:12px;"><table class="data-table"><thead><tr><th>원인</th><th>설명</th></tr></thead><tbody>
+      <tr><td class="highlight">Allocation Failure</td><td>대피할 목적지(빈 리전)가 부족</td></tr>
+      <tr><td class="highlight">Pinned Object</td><td>JNI 등이 네이티브에서 참조 중이라 객체 위치를 옮기면 안 됨</td></tr>
+    </tbody></table></div>
+  </div>
+  <div class="card">
+    <h3>Evacuation Failure 발생 시 처리</h3>
+    <div class="code-block">[STEP 1] 대피 실패한 리전은 이번 GC에서는 회수 못 함
+[STEP 2] 다음 GC 때 즉시 회수되도록
+         → Collection Set Candidate Region에 스케줄링
+[STEP 3] (핵심) 영리전이 대피 실패했다면 → 즉시 올드 리전으로 승격</div>
+    <div class="info-box purple">왜 영리전을 올드로 승격? Collection Set Candidate Region은 본래 <strong>올드 리전만 담는 구조</strong>. 영리전이 그대로 들어가면 구조가 깨짐 → 승격해서 자연스럽게 포함.</div>
+  </div>
+  <div class="card">
+    <h3>GC Log 패턴</h3>
+    <div class="info-box red">Full GC 발생 전 선행 GC들에서 <strong>Evacuation Failure 로그가 연달아</strong> 찍힌다. 이것이 메모리 부족의 사전 신호.</div>
+  </div>
+</div>
+<div class="section" id="s4">
+  <div class="section-header"><div class="chip red" style="background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.25);color:var(--danger);">Chapter 04</div><h2>G1GC에서의 Full GC</h2></div>
+  <div class="card">
+    <h3>발생 조건</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>조건</th><th>시나리오</th></tr></thead><tbody>
+      <tr><td class="highlight">Free 리전 고갈</td><td>객체 생성 속도 &gt; 회수 속도</td></tr>
+      <tr><td class="highlight">거대 객체 할당 시 연속된 free 리전 부족</td><td>단편화로 인한 할당 실패</td></tr>
+    </tbody></table></div>
+    <div class="info-box">(참고: G1 Full GC는 <strong>JDK 10(JEP 307)부터 parallel</strong>. 그 이전에는 single-thread Serial Old였다.)</div>
+  </div>
+  <div class="card">
+    <h3>거대 객체 할당 실패 시나리오 (단편화) — 2차 Full GC</h3>
+    <div class="code-block">[할당 전]
+┌──────┬──────┬──────┬──────┬──────┐
+│ free │  X   │ free │  X   │ free │   ← 연속된 free가 없음 → 1차 Full GC
+└──────┴──────┴──────┴──────┴──────┘
+
+[1차 Full GC] — 거대 객체는 그대로 두고 나머지만 Compact
+┌──────┬──────┬──────┬──────┬──────┐
+│X X X │  H   │ free │  H   │ free │   ← 휴몽고스는 위치 안 바뀜
+└──────┴──────┴──────┴──────┴──────┘
+                ↓ 아직도 연속 free 부족하면
+
+[2차 Full GC] — 휴몽고스도 이동 (같은 STW 안에서)
+┌──────┬──────┬──────┬──────┬──────┐
+│X X X │  H   │  H   │ free │ free │   ← 거대 객체 할당 성공
+└──────┴──────┴──────┴──────┴──────┘
+2차에서도 실패하면? → OutOfMemoryError 💀</div>
+  </div>
+  <div class="card">
+    <h3>Free 리전 고갈 시나리오 흐름</h3>
+    <div class="code-block">빠른 객체 생성 → Eden 빠르게 참 → 영GC 발생 (객체들이 안 죽음)
+    ↓
+대부분이 Survivor로 계속 evacuating (Aging X)
+    ↓
+Survivor도 못 버팀 → 조기 승격(Premature Promotion)으로 Old로
+    ↓
+Old가 빨리 차오름 + 거대 객체까지 가세
+    ↓
+IHOP 임계치 초과 → Concurrent Start 시작
+    ↓
+Concurrent Marking 중에도 객체 폭주 → Free 리전 고갈 → Full GC</div>
+    <div class="info-box yellow">Humongous Object가 많으면 빈 짜투리 공간을 안 쓰니까 힙 고갈이 빨라진다. G1 튜닝 사례: "배열 사이즈를 줄여서 Humongous로 안 가게 했다"가 이 맥락.</div>
+  </div>
+</div>
+<div class="section" id="s5">
+  <div class="section-header"><div class="chip green">Chapter 05</div><h2>Collection Set (CSet)</h2></div>
+  <div class="card">
+    <h3>정의 &amp; 구성</h3>
+    <p>GC를 수행하는 동안 수집 대상이 되는 리전들의 집합.</p>
+    <div class="code-block">┌─────────────────────────────────────────────┐
+│              Collection Set (CSet)          │
+├──────────────┬──────────────┬──────────────-┤
+│ Young Region │  Humongous   │  Collection   │
+│ (Eden+Surv)  │  Region      │  Candidate    │
+│  — 항상 포함  │ — Eager 대상  │  Region       │
+└──────────────┴──────────────┴───────────────┘</div>
+    <div class="info-box yellow">자주 헷갈리는 포인트: "영GC의 컬렉션 셋은 영리전만이다?" → <strong>아니다</strong>. Eager Reclaim 대상 휴몽고스 리전, Collection Candidate Region까지 포함될 수 있다.</div>
+  </div>
+  <div class="card">
+    <h3>Collection Candidate Region이 되는 두 가지 경로</h3>
+    <div class="cards-2">
+      <div class="card" style="margin-bottom:0;"><h3>경로 1</h3><p>Concurrent Marking으로 선별된 가비지 많은 올드 리전 → Remark → Cleanup 단계에서 Collection Candidate Region 등록</p></div>
+      <div class="card" style="margin-bottom:0;"><h3>경로 2</h3><p>Evacuation Failure를 경험한 리전 → 다음 GC의 Collection Candidate Region으로 자동 등록</p></div>
+    </div>
+  </div>
+</div>
+<div class="section" id="s6">
+  <div class="section-header"><div class="chip">Chapter 06</div><h2>GC Process 전체 흐름</h2></div>
+  <div class="card">
+    <h3>Mixed GC 기준 흐름</h3>
+    <div class="code-block">[Marking 단계]                    [Collection 단계]
+  SATB Algorithm                    Pre-Evacuation
+  (Snapshot-At-The-Beginning)     ├─ TLAB 연결 끊기
+  - Pre-write Barrier              ├─ Collection Set 확정
+  - TAMS (Top-At-Mark-Start)       └─ Merge Heap Roots (RemSet 통합)
+                                         ↓
+                                   Evacuation
+                                   (GC Root → reachable 객체
+                                    다른 리전으로 복사)
+                                         ↓
+                                   Post-Evacuation
+                                   (Cleanup, Mutator 재시작 준비)</div>
+    <p style="margin-top:8px;">영GC는 마킹 단계가 없고 GC Root에서 바로 Evacuation 시작.</p>
+  </div>
+  <div class="card">
+    <h3>GC Root가 될 수 있는 것</h3>
+    <p style="line-height:1.8;">JNI 핸들 / Thread Stack / Static 변수 / Code Cache (JIT 컴파일된 머신코드) / <strong>Remembered Set</strong> — 엄밀히는 전통적 의미의 GC Root는 아니지만, G1에서는 Collection Set 밖에서 안으로 향한 참조를 빠르게 찾는 역할(external roots처럼 취급)</p>
+    <div class="info-box yellow">Cleanup 단계의 의미 주의: 마킹 단계의 Cleanup 페이즈(Concurrent Marking 후 단계) ≠ Collection 단계의 Cleanup(GC 전체 마무리). 같은 단어지만 다른 맥락.</div>
+  </div>
+</div>
+<div class="section" id="s7">
+  <div class="section-header"><div class="chip purple">Chapter 07</div><h2>면접 포인트 모음</h2></div>
+  <div class="card">
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>질문</th><th>답</th></tr></thead><tbody>
+      <tr><td>"Humongous Object는 어디에 분류되나요?"</td><td>Old Generation. 단, Eager Reclamation 대상(prim 배열, 최근 JDK는 ref 배열까지)이면 영GC 때도 회수 가능.</td></tr>
+      <tr><td>"Evacuation Failure 두 가지 원인?"</td><td>① Allocation Failure(목적지 부족) ② Pinned Object(JNI 등으로 이동 금지)</td></tr>
+      <tr><td>"Evac Failure를 겪은 영리전은?"</td><td>즉시 올드 리전으로 승격되어 다음 GC의 Collection Set Candidate Region이 된다.</td></tr>
+      <tr><td>"G1GC Full GC는 한 번에 끝나나요?"</td><td>같은 STW 안에서 2단계로 동작 가능. 1차는 휴몽고스 고정+나머지 Compact, 1차로도 안 되면 2차에서 휴몽고스까지 이동. 그래도 실패하면 OOM.</td></tr>
+      <tr><td>"MaxPauseTimeGoal을 G1이 못 맞추는 경우?"</td><td>① 통계 기반 예측 실패 ② Full GC 발생.</td></tr>
+      <tr><td>"Collection Candidate Region이 되는 경로?"</td><td>① Concurrent Marking 후 가비지 많은 올드 선별 ② Evacuation Failure를 경험한 리전.</td></tr>
+    </tbody></table></div>
+  </div>
+  <div class="card" style="margin-top:16px;">
+    <h3>용어 매핑</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>영문</th><th>한글</th><th>맥락</th></tr></thead><tbody>
+      <tr><td class="code">Humongous Object</td><td>거대 객체</td><td>리전 절반 이상</td></tr>
+      <tr><td class="code">Evacuation Failure</td><td>대피 실패</td><td>GC 중 살아있는 객체 이동 불가</td></tr>
+      <tr><td class="code">Pinned Object</td><td>핀드 객체</td><td>JNI 등으로 위치 고정</td></tr>
+      <tr><td class="code">Eager Reclamation</td><td>조기 회수</td><td>prim 배열 거대 객체의 영GC 회수</td></tr>
+      <tr><td class="code">Premature Promotion</td><td>조기 승격</td><td>Aging 안 채운 영객체를 Old로</td></tr>
+    </tbody></table></div>
+  </div>
+</div>
+<div class="section" id="quiz">
+  <div class="section-header"><div class="chip">퀴즈</div><h2>실력 확인 — 20문제</h2><p>11부 핵심 개념 점검.</p></div>
+  <div id="quizMain">
+    <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="qProgressFill" style="width:0%"></div></div>
+    <div class="quiz-q-count" id="qCount">1 / 20</div>
+    <div class="quiz-question" id="qText"></div>
+    <div class="quiz-options" id="qOptions"></div>
+    <div class="quiz-explanation" id="qExplanation"></div>
+    <button class="btn btn-primary" id="qNextBtn" style="display:none;" onclick="quizNext()">다음 문제 →</button>
+  </div>
+  <div class="quiz-result" id="quizResult">
+    <div class="score-num" id="quizScore"></div><p id="quizComment"></p>
+    <button class="btn btn-ghost" style="margin-top:24px;" onclick="quizRestart()">다시 풀기</button>
+  </div>
+</div>
+</main>
+<script>const questions = [{"q": "G1GC의 정체성을 가장 잘 설명하는 것은?", "o": ["Throughput만 추구하는 Parallel Collector", "Latency만 추구하는 Low-pause Collector", "Throughput과 Latency의 밸런스를 추구하는 Balanced Collector", "단순함을 추구하는 Serial Collector"], "a": 2, "e": "G1GC는 Parallel GC의 High Throughput + MaxPauseTimeGoal 높은 확률 충족을 동시에 추구하는 Balanced Collector다."}, {"q": "Humongous Object 판정 기준은?", "o": ["힙 전체의 1% 이상", "리전 사이즈의 50% 이상", "힙 전체의 10% 이상", "256MB 이상"], "a": 1, "e": "리전 사이즈의 절반(50%) 이상을 차지하는 객체가 Humongous Object로 판정된다."}, {"q": "Humongous Object는 어느 Generation으로 분류되는가?", "o": ["Young Generation", "Old Generation", "별도의 Humongous Generation", "Eden과 Old 사이"], "a": 1, "e": "Humongous Object는 기본적으로 Old Generation으로 분류된다. 따라서 영GC에서는 원칙적으로 회수 대상이 아니다."}, {"q": "Humongous Object가 영GC에서 회수될 수 있는 조건은?", "o": ["항상 불가능", "리전 1개에 들어갈 때만", "Eager Reclamation 대상(전통적으로 primitive 타입 배열)일 때", "참조 횟수가 1 이하일 때"], "a": 2, "e": "Eager Reclamation 대상인 경우(전통적으로 primitive 타입 배열, 최근 JDK에서 reference 배열까지 확장)에 한해 영GC에서도 회수될 수 있다."}, {"q": "거대 객체가 일반 객체와 다르게 IHOP을 체크하는 시점은?", "o": ["영GC 끝나는 시점", "할당될 때마다 즉시", "Concurrent Start 시작 시", "Remark 단계"], "a": 1, "e": "Humongous Object는 사이즈가 커서 메모리를 빠르게 고갈시킬 수 있으므로, 할당될 때마다 즉시 IHOP을 체크한다. 일반 객체는 영GC 끝에서 체크한다."}, {"q": "Evacuation Failure의 두 가지 원인은?", "o": ["TLAB 부족과 SATB 버퍼 오버플로우", "Allocation Failure(목적지 부족)와 Pinned Object(이동 금지)", "Old Gen 포화와 Young Gen 포화", "Full GC 실패와 OOM"], "a": 1, "e": "Evacuation Failure의 두 원인은 ① Allocation Failure (대피할 목적지 빈 리전이 부족) ② Pinned Object (JNI 등이 네이티브에서 참조 중이라 객체 위치를 옮기면 안 됨)이다."}, {"q": "영리전이 Evacuation Failure를 겪었을 때 어떻게 처리되는가?", "o": ["즉시 회수된다", "다음 Young GC에서 다시 시도", "즉시 올드 리전으로 승격되어 다음 GC의 Collection Set Candidate가 된다", "힙 확장이 발생한다"], "a": 2, "e": "영리전이 대피 실패하면 즉시 올드 리전으로 승격된다. Collection Set Candidate Region은 본래 올드 리전만 담는 구조이므로, 승격해서 자연스럽게 포함시킨다."}, {"q": "Full GC에서 거대 객체의 처리 방식은?", "o": ["1차 Full GC에서 바로 이동된다", "1차 Full GC에서는 고정, 그래도 안 되면 2차에서 이동", "항상 이동 불가", "Full GC 시 즉시 회수된다"], "a": 1, "e": "1차 Full GC에서는 거대 객체는 고정하고 나머지만 Compact한다. 1차로도 거대 객체 할당이 안 되면, 같은 STW 안에서 2차 Full GC를 수행하여 휴몽고스도 이동시킨다."}, {"q": "G1 Full GC가 JDK 10부터 어떻게 바뀌었는가?", "o": ["Concurrent하게 동작", "Parallel로 동작 (JEP 307)", "ZGC로 대체", "더 이상 발생하지 않음"], "a": 1, "e": "G1 Full GC는 JDK 10(JEP 307)부터 parallel로 동작한다. 그 이전에는 single-thread Serial Old였다."}, {"q": "Full GC 발생 시 살아남은 영 객체는?", "o": ["다음 Young GC를 기다린다", "Survivor로 이동한다", "모두 올드로 승격된다", "회수된다"], "a": 2, "e": "Full GC가 끝나면 살아남은 영 객체는 모두 올드로 승격된다. Serial GC와 같은 동작이다."}, {"q": "Collection Set Candidate Region이 되는 두 가지 경로는?", "o": ["TLAB 할당 실패 + Survivor 오버플로우", "Concurrent Marking 후 가비지 많은 올드 선별 + Evacuation Failure를 경험한 리전", "IHOP 초과 + Full GC 발생", "Old Gen 포화 + Young Gen 포화"], "a": 1, "e": "Collection Set Candidate Region이 되는 경로는 ① Concurrent Marking으로 가비지 많은 올드 리전 선별 ② Evacuation Failure를 경험한 리전 두 가지다."}, {"q": "G1GC의 6가지 특징 중 'Mostly Concurrent'가 의미하는 바는?", "o": ["모든 GC 단계가 어플리케이션과 동시 실행", "마킹 과정은 대부분 뮤테이터와 동시, YGC/Mixed GC는 STW", "GC 스레드가 여러 개", "객체를 복사하는 방식"], "a": 1, "e": "Mostly Concurrent는 마킹 과정은 대부분 뮤테이터(어플리케이션 스레드)와 동시 실행된다는 의미다. YGC와 Mixed GC 자체는 STW다."}, {"q": "거대 객체가 한 리전보다 클 때 배치 방식은?", "o": ["가장 큰 free 리전 하나에 압축 저장", "연속된 free 리전들에 할당, 짜투리 공간은 버림", "Young Generation으로 분할 저장", "Swap 공간에 저장"], "a": 1, "e": "한 리전보다 큰 거대 객체는 연속된 free 리전들에 할당된다. 마지막 리전의 짜투리 공간은 사용하지 않고 버린다. 회수 시 N개 리전을 한 번에 free로 돌리면 된다."}, {"q": "G1GC가 'Real-time Collector'가 아닌 이유는?", "o": ["STW가 너무 길어서", "예측 실패 또는 Full GC 발생 시 MaxPauseTimeGoal을 못 맞춤", "Concurrent Marking이 없어서", "Young GC를 지원하지 않아서"], "a": 1, "e": "G1GC는 통계 기반 예측이므로 항상 맞는 것은 아니다. 예측 실패나 Full GC 발생 시 MaxPauseTimeGoal을 못 맞추기 때문에 '높은 확률로' 충족하는 것이지 Real-time 보장은 아니다."}, {"q": "Evacuation에서 Pinned Object가 문제가 되는 이유는?", "o": ["힙 메모리가 너무 커서", "JNI 등이 네이티브에서 참조 중이라 이동하면 네이티브 측 참조가 깨지기 때문", "객체 크기가 너무 커서", "GC Root로 등록되어 있어서"], "a": 1, "e": "JNI 등이 네이티브 메모리에서 자바 힙 객체를 참조 중일 때, 객체가 이동되면 네이티브 측 참조가 깨진다. 이런 객체는 '핀드(Pinned)'된 상태로 이동이 불가하다."}, {"q": "G1GC의 특징 중 'Evacuating'이 의미하는 것은?", "o": ["GC 도중 애플리케이션이 일시 중지", "살아있는 객체를 다른 리전으로 복사", "마킹된 객체를 제자리에서 삭제", "힙을 확장하는 것"], "a": 1, "e": "Evacuating은 살아있는 객체를 다른 리전으로 복사하는 방식을 의미한다. YGC/Mixed GC는 복사 방식이고, Full GC만 Mark-Sweep-Compact 방식이다."}, {"q": "Premature Promotion(조기 승격)이 발생하는 원인은?", "o": ["TLAB 크기가 너무 커서", "객체가 너무 빨리 죽어서", "Survivor가 못 버텨서 Aging을 채우지 못한 영 객체가 Old로 이동", "Humongous Object가 너무 많아서"], "a": 2, "e": "객체 생성 속도가 빠르면 영 객체들이 안 죽어서 대부분 Survivor로 이동하고, Survivor도 못 버티면 Aging을 채우지 못한 채 Old로 조기 승격(Premature Promotion)된다."}, {"q": "Humongous Object 회수의 일반적인 경로는?", "o": ["Full GC에서만 회수", "영GC에서만 회수", "Remark 단계 (일반적), 영GC Eager Reclamation (조건부), Full GC (최후의 수단)", "Mixed GC에서만 회수"], "a": 2, "e": "Humongous Object의 회수 시점은 ① Remark 단계(일반적인 회수 경로) ② 영GC 중 Eager Reclamation(primitive 배열 한정) ③ Full GC(최후의 수단)이다."}, {"q": "Free 리전 고갈로 Full GC가 발생하는 과정에서 Humongous Object의 역할은?", "o": ["Full GC를 방지한다", "빈 짜투리 공간을 사용하지 않으므로 힙 고갈을 가속시킨다", "Concurrent Marking을 중단시킨다", "Evacuation을 도와준다"], "a": 1, "e": "거대 객체는 배치 시 짜투리 공간을 버리므로, 거대 객체가 많으면 실제 데이터보다 더 빨리 힙이 고갈된다. 'G1 튜닝: 배열 사이즈를 줄여서 Humongous로 안 가게 했다'가 이 맥락이다."}, {"q": "2차 Full GC에서도 거대 객체 할당이 실패하면?", "o": ["3차 Full GC가 발생", "힙이 자동 확장", "OutOfMemoryError 발생", "ZGC로 전환"], "a": 2, "e": "2차 Full GC에서도 실패하면 OutOfMemoryError(OOM)가 발생한다."}];
+
+let qi=0,score=0,answered=false;
+function goTo(id){
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  if(id==='quiz'){
+    document.getElementById('quiz').classList.add('active');
+    document.querySelectorAll('.nav-item').forEach(n=>{if(n.textContent.includes('퀴즈'))n.classList.add('active');});
+    quizStart();
+  } else {
+    document.getElementById(id).classList.add('active');
+    const navItems=document.querySelectorAll('.nav-item');
+    navItems.forEach(n=>{
+      const num=n.querySelector('.num');
+      if(num&&id.startsWith('s')){
+        const idx=parseInt(id.replace('s',''));
+        if(num.textContent===String(idx).padStart(2,'0'))n.classList.add('active');
+      }
+    });
+  }
+  window.scrollTo(0,0);
+}
+function quizStart(){qi=0;score=0;answered=false;document.getElementById('quizMain').style.display='block';document.getElementById('quizResult').classList.remove('show');renderQ();}
+function renderQ(){const q=questions[qi];document.getElementById('qProgressFill').style.width=((qi/questions.length)*100)+'%';document.getElementById('qCount').textContent=(qi+1)+' / '+questions.length;document.getElementById('qText').textContent=q.q;document.getElementById('qExplanation').className='quiz-explanation';document.getElementById('qExplanation').textContent='';document.getElementById('qNextBtn').style.display='none';answered=false;const opts=document.getElementById('qOptions');opts.innerHTML='';q.o.forEach((o,i)=>{const d=document.createElement('div');d.className='quiz-opt';d.textContent=o;d.onclick=()=>answer(i,d);opts.appendChild(d);});}
+function answer(i,el){if(answered)return;answered=true;const q=questions[qi];document.querySelectorAll('.quiz-opt').forEach((d,j)=>{if(j===q.a)d.classList.add('correct');else if(j===i)d.classList.add('wrong');});if(i===q.a)score++;const exp=document.getElementById('qExplanation');exp.textContent=q.e;exp.classList.add('show');document.getElementById('qNextBtn').style.display='inline-flex';}
+function quizNext(){qi++;if(qi>=questions.length){document.getElementById('quizMain').style.display='none';document.getElementById('quizScore').textContent=score+'/'+questions.length;const pct=Math.round(score/questions.length*100);let c='';if(pct===100)c='완벽해요 🎉';else if(pct>=80)c='훌륭해요 👏';else if(pct>=60)c='잘 하셨어요 👍 틀린 챕터를 복습해보세요.';else if(pct>=40)c='절반 통과 ✨ 한 번 더 읽어보세요.';else c='복습이 필요해요 📖';document.getElementById('quizComment').textContent=pct+'% 정답률 — '+c;document.getElementById('quizResult').classList.add('show');}else{renderQ();}}
+function quizRestart(){quizStart();}
+document.addEventListener('DOMContentLoaded',()=>goTo('s0'));
+</script>
+</body></html>

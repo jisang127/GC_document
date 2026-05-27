@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC 10부 — G1GC Remembered Set</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="sidebar">
+  <a class="nav-home" href="index.html">← 목차로</a>
+  <div class="logo">
+    <div class="tag">GC 10부</div>
+    <h1>G1GC Remembered Set</h1>
+  </div>
+  <nav>
+    <div class="nav-item active" onclick="goTo('s0')"><span class="num">00</span> 한 줄 요약 & 복습</div>
+    <div class="nav-item" onclick="goTo('s1')"><span class="num">01</span> RS 필요성 & Young GC</div>
+    <div class="nav-item" onclick="goTo('s2')"><span class="num">02</span> Mixed GC & RS</div>
+    <div class="nav-item" onclick="goTo('s3')"><span class="num">03</span> 단순 구현의 낭비</div>
+    <div class="nav-item" onclick="goTo('s4')"><span class="num">04</span> 최적화① Region Grouping</div>
+    <div class="nav-item" onclick="goTo('s5')"><span class="num">05</span> 최적화② Rebuild RS</div>
+    <div class="nav-item" onclick="goTo('s6')"><span class="num">06</span> 최적화③ Merge Heap Roots</div>
+    <div class="nav-item" onclick="goTo('s7')"><span class="num">07</span> Mixed GC 전체 흐름</div>
+    <div class="nav-item" onclick="goTo('s8')"><span class="num">08</span> Q&A 헷갈리는 포인트</div>
+    <div class="nav-item" onclick="goTo('quiz')" style="margin-top:10px;border-top:1px solid var(--border);padding-top:14px;"><span class="num">🧪</span> 퀴즈 (20문제)</div>
+  </nav>
+</div>
+<main id="main">
+<div class="section active" id="s0">
+  <div class="section-header"><div class="chip">Chapter 00</div><h2>한 줄 요약 &amp; 빠른 복습</h2><p>G1GC Remembered Set의 역할과 세 가지 최적화 핵심.</p></div>
+  <div class="info-box" style="font-size:14px;font-weight:600;line-height:1.8;">G1GC에서 <strong>Remembered Set(RS)</strong>은 GC 루트의 추가 진입점 역할을 하며, 각 리전(또는 리전 그룹)에 대해 "외부에서 이 리전 내부를 가리키는 inbound 참조"를 기록한다. 단순 구현은 메모리를 <strong>5~10%</strong> 잡아먹기 때문에 JDK 25는 세 가지 최적화(<strong>리전 그루핑 / Rebuild RS / Merge Heap Roots</strong>)로 RS를 크게 압축한다. RS 갱신은 <strong>post-write barrier</strong>가 카드를 dirty로 마킹하고, <strong>Refinement Thread</strong>가 비동기로 dirty card를 처리해 RS에 반영한다.</div>
+  <div class="cards-2" style="margin-top:20px;">
+    <div class="card"><h3>핵심 명제</h3><p>RS는 사실상 <strong style="color:var(--accent);">GC Root와 동일한 역할</strong>을 수행한다.<br>영GC에서 영 객체에 도달하는 추가 진입점.</p></div>
+    <div class="card"><h3>Young RS (JDK 버전별)</h3><p>JDK 24까지: 각 영 리전마다 개별 RS<br><strong style="color:var(--accent3);">JDK 25: 영 제너레이션 전체가 단 하나의 통합 RS 공유</strong><br>이유: 영 Gen은 항상 전체가 컬렉션 대상</p></div>
+  </div>
+  <div class="card">
+    <h3>세 가지 최적화 한눈에</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>최적화</th><th>타이밍</th><th>무엇을 줄이나</th></tr></thead><tbody>
+      <tr><td class="highlight">Region Grouping</td><td>Remark 단계</td><td>그룹 내부 참조 + 그룹 내 중복</td></tr>
+      <tr><td class="highlight">Rebuild RS</td><td>Remark~Cleanup 사이 (concurrent)</td><td>비후보 리전 RS 자체 생성 안 함</td></tr>
+      <tr><td class="highlight">Merge Heap Roots</td><td>Mixed GC 시작 직후</td><td>CSet 내 그룹 간 중복</td></tr>
+    </tbody></table></div>
+  </div>
+</div>
+<div class="section" id="s1">
+  <div class="section-header"><div class="chip">Chapter 01</div><h2>RS 필요성 &amp; Young GC</h2></div>
+  <div class="card">
+    <h3>왜 Remembered Set이 필요한가</h3>
+    <div class="info-box red">문제: Young GC가 영 객체만 회수하려고 올드 객체 스캔을 건너뛰면, 올드→영 참조만으로 살아있는 영 객체가 "도달 불가능"으로 잘못 판단되어 회수된다.</div>
+    <div class="code-block">GC Root ── B(올드) ── C(영, 살아있음)
+              ↑ 영GC는 "올드"라며 스캔 skip
+              ↓
+              C는 살아있음에도 회수됨 (BUG)</div>
+    <div class="info-box green" style="margin-bottom:0;">해결: 올드 객체가 영 객체를 참조하는 경우를 별도 자료구조(=RS)에 모아두고, 영GC 시 GC 루트와 함께 RS를 출발점으로 사용한다.</div>
+  </div>
+  <div class="card">
+    <h3>올드 RS에는 영→올드 참조가 안 들어간다</h3>
+    <p>영 제너레이션은 매 GC마다 전체가 스캔되므로 영→올드 참조는 evacuation 중 영 객체를 따라가다 자연스럽게 발견된다. 즉 올드 RS가 추적해야 할 inbound 참조는 <strong>다른 올드 리전(CSet 밖)에서 들어오는 참조뿐</strong>.</p>
+  </div>
+</div>
+<div class="section" id="s2">
+  <div class="section-header"><div class="chip">Chapter 02</div><h2>Mixed GC &amp; RS</h2></div>
+  <div class="card">
+    <h3>Mixed GC에서 발생하는 새 문제</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>항목</th><th>Young GC</th><th>Mixed GC</th></tr></thead><tbody>
+      <tr><td>영 제너레이션</td><td>전체 수집</td><td>전체 수집</td></tr>
+      <tr><td>올드 제너레이션</td><td>수집 안 함</td><td><strong>일부 올드 리전 선택 수집</strong></td></tr>
+      <tr><td>컬렉션 셋(CSet)</td><td>영 리전 전체</td><td>영 리전 전체 + 선택된 올드 리전들</td></tr>
+    </tbody></table></div>
+    <div class="info-box yellow" style="margin-top:12px;">판정 기준이 "올드냐 영이냐"에서 <strong>"CSet에 들어있냐 아니냐"</strong>로 바뀐다. CSet에 포함된 올드 리전 → 스캔 O, 포함 안 된 올드 리전 → 스캔 X.</div>
+  </div>
+  <div class="card">
+    <h3>새로운 누락 시나리오</h3>
+    <div class="code-block">GC Root → A(영) → X(CSet 밖 올드) → Y(CSet 밖 올드) → C(CSet 안 올드, 살아있음)
+                              ↑ Mixed GC가 X에서 스캔 멈춤
+                              ↓
+                              C 회수 (BUG)</div>
+    <div class="info-box green">해결: 각 올드 리전은 자기 자신을 외부에서 참조하는 올드 객체를 저장하는 RS를 가진다. Mixed GC 시 RS#를 GC 루트처럼 활용해 회수 누락을 방지.</div>
+  </div>
+  <div class="card">
+    <h3>CSet vs Collection Set Candidate Regions — 용어 구분</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>용어</th><th>의미</th><th>결정 시점</th></tr></thead><tbody>
+      <tr><td class="highlight">Collection Set (CSet)</td><td>이번 GC turn에 실제로 수집할 리전들의 집합</td><td>GC 시작 시 확정</td></tr>
+      <tr><td class="highlight">Collection Set Candidate Regions</td><td>CSet 후보군 (가비지 많아서 회수하면 좋을 올드 리전 풀)</td><td>Remark 단계에서 최초 확정, Cleanup에서 일부 빠질 수도 있음</td></tr>
+    </tbody></table></div>
+  </div>
+</div>
+<div class="section" id="s3">
+  <div class="section-header"><div class="chip purple">Chapter 03</div><h2>단순 구현의 메모리 낭비</h2></div>
+  <div class="card">
+    <h3>낭비 ① — 같은 CSet 내부 참조 저장</h3>
+    <div class="code-block">[Region 0] ←──참조 H──── [Region 1]   RS_0: {H}
+[Region 1] ←──참조 D──── [Region 0]   RS_1: {D}
+
+어차피 같은 Mixed GC turn에 둘 다 스캔됨
+→ RS_0의 H, RS_1의 D는 저장할 필요 없는 정보</div>
+  </div>
+  <div class="card">
+    <h3>낭비 ② — 중복 참조</h3>
+    <p>영 RS와 올드 RS가 같은 객체(예: I)를 동시에 들고 있는 경우, 같은 CSet에 묶이면 한 번만 스캔하면 충분.</p>
+    <div class="info-box red">과거 GC 데이터: 단순 per-region RS만으로도 <strong>전체 힙의 5~10%</strong>를 잡아먹는 경우가 있었다. 힙이 16GB, 32GB로 커지면서 부담 가중.</div>
+  </div>
+</div>
+<div class="section" id="s4">
+  <div class="section-header"><div class="chip green">Chapter 04</div><h2>최적화 ① — Region Grouping</h2></div>
+  <div class="card">
+    <h3>아이디어</h3>
+    <p style="margin-bottom:12px;">"같은 시기에 수집될 애들끼리는 그루핑하자." CSet Candidate Regions 안에서 함께 수집되어도 되는 올드 리전들을 묶어 하나의 그룹으로 만들고, 그 그룹에 대해 RS를 하나만 둔다.</p>
+    <div class="code-block">Before:                    After grouping:
+[R0] [R1] [R7] [R8]       [Group A: R0, R1]  [Group B: R7, R8]
+ RS   RS   RS   RS              RS_A               RS_B
+(4개)                          (2개)</div>
+  </div>
+  <div class="card">
+    <h3>제약 조건 &amp; 효과</h3>
+    <div class="info-box yellow">제약: 그룹된 리전들은 반드시 <strong>같은 Mixed GC turn에 한 번에 회수</strong>돼야 한다 (분리 수집 불가).</div>
+    <div class="table-wrap" style="margin-top:8px;"><table class="data-table"><thead><tr><th>효과</th><th>설명</th></tr></thead><tbody>
+      <tr><td class="highlight">메모리 절약 ①</td><td>그룹 내부 참조는 저장 안 함</td></tr>
+      <tr><td class="highlight">메모리 절약 ②</td><td>그룹 내 중복 참조 자연 제거</td></tr>
+      <tr><td class="highlight">인크리멘탈 GC와 궁합</td><td>Space Reclamation Phase에서 묶어 처리 가능</td></tr>
+    </tbody></table></div>
+  </div>
+</div>
+<div class="section" id="s5">
+  <div class="section-header"><div class="chip yellow">Chapter 05</div><h2>최적화 ② — Rebuild Remembered Set</h2></div>
+  <div class="card">
+    <h3>핵심 명제</h3>
+    <div class="info-box green">올드 리전의 RS는 <strong>Remark 페이즈 시작 후에 비로소 생성</strong>된다. 그 전까지는 안 만든다.</div>
+    <p style="margin-top:12px;">올드 리전은 Candidate에 선정될지조차 불확실하고, 선정되더라도 Mixed GC가 여러 번 인크리멘탈하게 도는 동안 언제 자기 차례가 올지 모른다. 매 참조 변경마다 모든 올드 리전 RS를 갱신하는 건 CPU·메모리 모두 낭비.</p>
+  </div>
+  <div class="card">
+    <h3>동작 흐름</h3>
+    <div class="code-block">[Remark, STW] 마킹 완료
+    ↓
+Candidate Regions 최초 확정
+    ↓
+[Concurrent, Remark~Cleanup 사이]
+Rebuild RS 실행:
+  for each region in Candidate Regions:
+    live 객체를 방문하면서
+    "이 객체가 다른 Candidate region/group을 참조하는가?" 검사
+    → 그렇다면 그 타겟의 RS에 현재 객체 추가
+    ↓
+[Cleanup, STW] Candidate 파이널라이즈</div>
+    <div class="info-box">중요: Rebuild는 모든 올드 리전이 아닌 <strong>Candidate Regions에 속한 리전(또는 그룹)에 대해서만</strong> 수행.</div>
+  </div>
+  <div class="card">
+    <h3>Post-Write Barrier — 컨커런트 갱신 처리</h3>
+    <p style="margin-bottom:12px;">Rebuild RS는 STW 사이에 컨커런트하게 도는데, 그동안 어플리케이션이 참조를 새로 만들 수 있다.</p>
+    <div class="code-block">obj.field = newRef;                              // 참조 변경
+post_write_barrier(obj, &amp;obj.field, newRef);  // 해당 카드를 dirty 마킹</div>
+    <p style="margin-top:12px;">이후 <strong>Refinement Thread</strong>(<span class="inline-code">-XX:G1ConcRefinementThreads</span>)가 비동기로 dirty card를 훑어 cross-region 참조면 타겟 region의 RS에 반영한다.</p>
+    <div class="info-box purple">Pre-write barrier(9부, SATB 유지)와 짝을 이루는 개념. Pre = 마킹 보호용, <strong>Post = RS 갱신용</strong>.</div>
+  </div>
+</div>
+<div class="section" id="s6">
+  <div class="section-header"><div class="chip">Chapter 06</div><h2>최적화 ③ — Merge Heap Roots</h2></div>
+  <div class="card">
+    <h3>핵심 명제</h3>
+    <div class="info-box green">Mixed GC가 시작될 때, <strong>CSet의 모든 RS를 하나로 합친다.</strong> "Heap Root"가 RS를 의미하며, "Merge" = 합치기.</div>
+    <p style="margin-top:12px;">Rebuild RS로 그룹별 RS는 압축됐지만, 여러 그룹이 같은 CSet에 들어오면 그룹 간 중복은 여전히 남는다.</p>
+    <div class="code-block">CSet = { Group A (R0, R1), Group B (R7, R8) }
+RS_A = {F, I}
+RS_B = {2, I}  ← I가 양쪽에 중복
+
+Merge → RS_merged = {F, I, 2}  ← 중복 제거</div>
+  </div>
+  <div class="card">
+    <h3>타이밍</h3>
+    <div class="code-block">[Mixed GC 시작]
+    ↓
+[Merge Heap Roots]  ← 여기! (evacuation 직전)
+    ↓
+[Evacuation]
+    ↓
+[Cleanup &amp; Free]</div>
+    <p>원본 RS들은 삭제되지 않고 별도로 머지된 RS가 만들어진다.</p>
+  </div>
+</div>
+<div class="section" id="s7">
+  <div class="section-header"><div class="chip purple">Chapter 07</div><h2>Mixed GC 전체 흐름 &amp; Forwarding Pointer</h2></div>
+  <div class="card">
+    <h3>Forwarding Pointer 메커니즘</h3>
+    <p style="margin-bottom:12px;">객체를 복사할 때 원래 위치를 즉시 free하지 않고 <strong>객체 헤더에 새 주소(forwarding pointer)</strong>를 남긴다.</p>
+    <div class="code-block">[Before move]          [After move]
+┌──────────┐           ┌──────────┐  ← 새 위치
+│ Object D │           │ Object D │
+│ data...  │           │ data...  │
+└──────────┘           └──────────┘
+                              ↑ forwarding
+                       ┌──────────┐  ← 옛 위치
+                       │ FWD ptr  │
+                       │ →new     │
+                       └──────────┘</div>
+    <p>다른 스레드가 옛 주소로 D를 방문하면 → 헤더의 forwarding pointer 확인 → "아, 이미 옮겨졌네" → 자기 참조만 새 주소로 업데이트.</p>
+  </div>
+  <div class="card">
+    <h3>Mixed GC 종료 후 자료구조 상태</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>자료구조</th><th>종료 후 상태</th></tr></thead><tbody>
+      <tr><td>CSet에 있던 영 리전</td><td>비워짐, 다음 영GC 대비</td></tr>
+      <tr><td>CSet에 있던 올드 리전(그룹)</td><td>비워짐 + 해당 그룹의 RS도 삭제</td></tr>
+      <tr><td>CSet에 없던 영/올드 리전</td><td>그대로 유지</td></tr>
+      <tr><td>영 제너레이션 RS</td><td>그대로 유지 (계속 실시간 갱신)</td></tr>
+      <tr><td>Merged RS (임시)</td><td>삭제</td></tr>
+    </tbody></table></div>
+  </div>
+</div>
+<div class="section" id="s8">
+  <div class="section-header"><div class="chip green">Chapter 08</div><h2>Q&amp;A 헷갈리는 포인트</h2></div>
+  <div class="card">
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>질문</th><th>답</th></tr></thead><tbody>
+      <tr><td>Young GC vs Mixed GC 판정 기준?</td><td>영GC: "올드 리전인가?" → skip. Mixed GC: <strong>"CSet 안의 리전인가?"</strong> → 스캔 / 아니면 skip. 올드냐 영이냐가 아닌 CSet 멤버십이 기준.</td></tr>
+      <tr><td>왜 올드 RS는 영→올드 참조를 저장하지 않나?</td><td>영 제너레이션은 매 GC마다 항상 전체가 스캔된다. 영→올드 참조는 영 객체를 따라가다 evacuation 과정에서 자연스럽게 발견됨.</td></tr>
+      <tr><td>RS에는 객체가 저장되나, 주소가 저장되나?</td><td>실제로는 source 측 객체가 위치한 <strong>카드(card)의 주소</strong>가 저장된다. 카드 테이블(card table) 기반이며, GC 시 해당 카드만 정밀 스캔해 실제 참조를 찾는다.</td></tr>
+      <tr><td>JDK 24 vs JDK 25 영 RS 차이?</td><td>~JDK 24: 영 리전별 개별 RS. JDK 25: 영 제너레이션 전체 통합 1개.</td></tr>
+      <tr><td>Concurrent vs Parallel 용어?</td><td>Concurrent = GC 스레드와 어플리케이션 스레드가 동시에 실행. Parallel = 여러 개의 GC 스레드가 병렬 실행. GC 문서에서는 엄격히 구분.</td></tr>
+      <tr><td>CSet Candidate Regions는 언제 확정?</td><td>Remark(STW): 최초 확정. Remark~Cleanup 사이: Rebuild RS 실행. Cleanup(STW): 파이널라이즈. Space Reclamation: Mixed GC 인크리멘탈 실행.</td></tr>
+    </tbody></table></div>
+  </div>
+  <div class="card" style="margin-top:16px;">
+    <h3>핵심 요약 표</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>항목</th><th>답</th></tr></thead><tbody>
+      <tr><td>RS가 GC 루트와 같은 역할을 하는 이유</td><td>영 객체에 도달하는 추가 진입점 제공 (올드 스캔 건너뛰기 보완)</td></tr>
+      <tr><td>영 제너레이션 RS 개수 (JDK 25)</td><td>통합 1개</td></tr>
+      <tr><td>올드 리전 RS 생성 시점</td><td>Remark 페이즈 시작 후 (Rebuild RS)</td></tr>
+      <tr><td>RS 갱신 시점 (런타임)</td><td>Post-write barrier로 컨커런트 갱신</td></tr>
+      <tr><td>세 가지 최적화</td><td>Region Grouping / Rebuild RS / Merge Heap Roots</td></tr>
+    </tbody></table></div>
+  </div>
+</div>
+<div class="section" id="quiz">
+  <div class="section-header">
+    <div class="chip">퀴즈</div>
+    <h2>실력 확인 — 20문제</h2>
+    <p>10부 핵심 개념 점검.</p>
+  </div>
+  <div id="quizMain">
+    <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="qProgressFill" style="width:0%"></div></div>
+    <div class="quiz-q-count" id="qCount">1 / 20</div>
+    <div class="quiz-question" id="qText"></div>
+    <div class="quiz-options" id="qOptions"></div>
+    <div class="quiz-explanation" id="qExplanation"></div>
+    <button class="btn btn-primary" id="qNextBtn" style="display:none;" onclick="quizNext()">다음 문제 →</button>
+  </div>
+  <div class="quiz-result" id="quizResult">
+    <div class="score-num" id="quizScore"></div>
+    <p id="quizComment"></p>
+    <button class="btn btn-ghost" style="margin-top:24px;" onclick="quizRestart()">다시 풀기</button>
+  </div>
+</div>
+</main>
+<script>
+const questions = [{"q": "Remembered Set(RS)이 G1GC에서 GC Root와 동일한 역할을 한다는 의미는?", "o": ["모든 객체를 저장한다", "영 객체에 도달하는 추가 진입점을 제공한다", "올드 객체를 직접 회수한다", "마킹을 위한 스냅샷이다"], "a": 1, "e": "RS는 올드 스캔을 건너뛰는 Young GC에서, 올드→영 참조를 통해 살아있는 영 객체를 찾을 수 있게 해주는 추가 진입점이다."}, {"q": "JDK 25에서 Young 제너레이션의 RS는 몇 개인가?", "o": ["영 리전마다 개별 1개", "Young 제너레이션 전체 통합 1개", "Old 리전과 공유", "존재하지 않음"], "a": 1, "e": "JDK 24까지는 각 영 리전마다 개별 RS였지만, JDK 25부터 영 제너레이션 전체가 단 하나의 통합 RS를 공유한다. 영 Gen은 항상 전체가 컬렉션 대상이므로 리전별로 쪼갤 이유가 없다."}, {"q": "올드 RS에 영→올드 참조를 저장하지 않는 이유는?", "o": ["메모리가 부족해서", "영 제너레이션은 매 GC마다 전체가 스캔되므로 자연스럽게 발견된다", "올드→영 참조만 저장하기 때문", "영 객체는 GC 대상이 아니기 때문"], "a": 1, "e": "영 제너레이션은 매 GC마다 항상 전체가 스캔된다. 따라서 영→올드 참조는 영 객체를 따라가다 evacuation 과정에서 자연스럽게 발견된다."}, {"q": "Mixed GC에서 CSet 포함 여부 판정 기준은?", "o": ["올드 리전이냐 영 리전이냐", "CSet에 들어있냐 아니냐", "힙 점유율이 50% 이상이냐", "RS가 있느냐 없느냐"], "a": 1, "e": "Mixed GC에서 판정 기준은 올드냐 영이냐가 아니라 'CSet에 들어있냐 아니냐'이다. CSet에 포함된 올드 리전은 스캔, 포함 안 된 올드 리전은 스캔 X."}, {"q": "단순 per-region RS 구현이 차지할 수 있는 메모리 비율은?", "o": ["1~2%", "5~10%", "20~30%", "50% 이상"], "a": 1, "e": "과거 GC 데이터에 따르면 단순 per-region RS만으로도 전체 힙의 5~10%를 잡아먹는 경우가 있었다. 힙이 16GB, 32GB로 커지면서 부담이 가중된다."}, {"q": "Region Grouping의 핵심 제약 조건은?", "o": ["그룹 내 리전은 다른 Mixed GC turn에 분산 수집된다", "그룹된 리전들은 반드시 같은 Mixed GC turn에 한 번에 회수돼야 한다", "그룹은 최대 2개 리전만 묶을 수 있다", "Young 리전도 그룹에 포함된다"], "a": 1, "e": "그룹된 리전들은 반드시 같은 Mixed GC turn에 한 번에 회수돼야 한다(분리 수집 불가). 이 제약 때문에 그룹 내부 참조를 RS에 저장하지 않아도 된다."}, {"q": "올드 리전의 RS는 언제 생성되는가?", "o": ["JVM 시작 시", "매 Young GC 때마다", "Remark 페이즈 시작 후 (Rebuild RS)", "Concurrent Marking 시작 시"], "a": 2, "e": "올드 리전의 RS는 Remark 페이즈 시작 후에 비로소 생성된다. Candidate에 선정될지조차 불확실하기 때문에 그 이전에 RS를 유지하는 것은 낭비다."}, {"q": "Rebuild RS는 어떤 리전에 대해서만 수행되는가?", "o": ["모든 올드 리전", "Candidate Regions에 속한 리전(또는 그룹)에 대해서만", "Young 리전 전체", "힙 점유율 50% 이상인 리전"], "a": 1, "e": "Rebuild RS는 모든 올드 리전이 아닌 Candidate Regions에 속한 리전(또는 그룹)에 대해서만 수행된다. Candidate 아닌 리전은 어차피 수집 안 되므로 RS가 불필요하다."}, {"q": "Post-write barrier가 하는 일은?", "o": ["기존 참조 객체를 SATB 버퍼에 push", "해당 카드를 dirty로 마킹", "객체를 새 리전으로 복사", "GC Root에 객체 추가"], "a": 1, "e": "Post-write barrier는 새 참조가 생기면 해당 source 객체가 위치한 카드를 dirty로 마킹한다. RS를 직접 건드리지 않고(그러면 mutator가 느려짐) 카드만 마킹한다."}, {"q": "Dirty card를 실제로 RS에 반영하는 주체는?", "o": ["Mutator Thread", "GC Thread", "Refinement Thread", "JVM Main Thread"], "a": 2, "e": "Refinement Thread(-XX:G1ConcRefinementThreads)가 비동기로 dirty card를 훑어 cross-region 참조면 타겟 region의 RS에 반영한다."}, {"q": "Merge Heap Roots의 타이밍은?", "o": ["Remark 단계", "Concurrent Marking 중", "Mixed GC 시작 직후 (evacuation 직전)", "Cleanup 단계"], "a": 2, "e": "Merge Heap Roots는 Mixed GC 시작 직후, evacuation 직전에 수행된다. CSet의 모든 RS를 하나로 합쳐 그룹 간 중복을 제거한다."}, {"q": "Forwarding Pointer의 역할은?", "o": ["객체를 GC Root로 등록", "복사된 객체의 옛 위치에 새 주소를 남겨 참조 업데이트를 가능하게 함", "SATB 버퍼에 참조를 기록", "리전 간 참조를 RS에 저장"], "a": 1, "e": "객체를 복사할 때 원래 위치를 즉시 free하지 않고 객체 헤더에 새 주소(forwarding pointer)를 남긴다. 다른 스레드가 옛 주소로 방문하면 forwarding pointer를 통해 새 주소로 참조를 업데이트한다."}, {"q": "Pre-write barrier와 Post-write barrier의 차이는?", "o": ["Pre는 RS 갱신용, Post는 마킹 보호용", "Pre는 마킹 보호용(SATB), Post는 RS 갱신용", "둘 다 SATB 버퍼에 push", "둘 다 RS를 직접 갱신"], "a": 1, "e": "Pre-write barrier는 9부에서 다룬 SATB 유지(마킹 보호)용, Post-write barrier는 RS 갱신용이다. 짝을 이루는 개념."}, {"q": "CSet Candidate Regions의 최초 확정은 어느 단계에서 이루어지는가?", "o": ["Concurrent Start", "Concurrent Marking", "Remark (STW)", "Cleanup (STW)"], "a": 2, "e": "CSet Candidate Regions은 Remark(STW) 단계에서 최초 확정된다. Cleanup에서 일부가 빠질 수도 있고, Space Reclamation Phase에서 Mixed GC가 인크리멘탈하게 Candidate에서 골라 실행된다."}, {"q": "Collection Set과 Collection Set Candidate Regions의 결정적 차이는?", "o": ["Collection Set은 Young 리전만 포함", "CSet은 이번 GC turn에 실제 수집할 리전, Candidate는 후보군", "Candidate는 항상 Old 리전만 포함", "CSet은 Remark 때 확정됨"], "a": 1, "e": "Collection Set(CSet)은 이번 GC turn에 실제로 수집할 리전들의 집합(GC 시작 시 확정). Collection Set Candidate Regions는 미래의 CSet 후보군(Remark 때 최초 확정)."}, {"q": "G1GC 문서에서 Concurrent와 Parallel의 차이는?", "o": ["동일한 의미로 혼용", "Concurrent = GC와 앱이 동시 실행, Parallel = 여러 GC 스레드가 병렬 실행", "Concurrent = STW, Parallel = non-STW", "Concurrent = 단일 스레드, Parallel = 멀티 스레드"], "a": 1, "e": "G1GC 문서에서 Concurrent는 GC 스레드와 어플리케이션 스레드가 동시에 실행, Parallel은 여러 개의 GC 스레드가 병렬 실행을 의미한다. 일반 프로그래밍과 달리 엄격히 구분한다."}, {"q": "Region Grouping이 절약하는 두 가지는?", "o": ["TLAB 할당 비용과 STW 시간", "그룹 내부 참조 저장 + 그룹 내 중복 참조", "영 리전 수와 올드 리전 수", "GC Root 수와 Mark Stack 크기"], "a": 1, "e": "Region Grouping은 ① 그룹 내부 참조를 저장하지 않아도 됨(낭비 ① 제거) ② 그룹 내 중복 참조를 자연 제거(낭비 ② 제거)의 두 가지 효과가 있다."}, {"q": "Rebuild RS가 Concurrent하게 수행되는 구간은?", "o": ["Concurrent Start ~ Root Region Scanning", "Root Region Scanning ~ Concurrent Marking", "Remark ~ Cleanup 사이", "Cleanup ~ Mixed GC 시작 전"], "a": 2, "e": "Rebuild RS는 Remark(STW) 이후부터 Cleanup(STW) 이전까지, 즉 두 STW 사이에 concurrent하게 수행된다."}, {"q": "Merge Heap Roots 이후 원본 RS들은?", "o": ["모두 삭제된다", "삭제되지 않고 별도로 머지된 RS가 만들어진다", "각 그룹 RS로 분리된다", "Rebuild RS가 다시 수행된다"], "a": 1, "e": "Merge Heap Roots는 원본 RS들을 삭제하지 않고 별도로 머지된 RS를 만든다. Mixed GC 종료 후 Merged RS(임시)가 삭제된다."}, {"q": "RS에 실제로 저장되는 것은?", "o": ["객체 그 자체", "source 측 객체가 위치한 카드(card)의 주소", "리전 번호", "힙 오프셋"], "a": 1, "e": "설명용으로는 객체로 표현하지만, 실제로는 그 리전을 참조하는 source 측 객체가 위치한 카드(card)의 주소가 저장된다. 즉 카드 테이블 기반이며, GC 시 해당 카드만 정밀 스캔해 실제 참조를 찾는다."}];
+
+let qi=0,score=0,answered=false;
+function goTo(id){
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  if(id==='quiz'){
+    document.getElementById('quiz').classList.add('active');
+    document.querySelectorAll('.nav-item').forEach(n=>{if(n.textContent.includes('퀴즈'))n.classList.add('active');});
+    quizStart();
+  } else {
+    document.getElementById(id).classList.add('active');
+    const navItems=document.querySelectorAll('.nav-item');
+    navItems.forEach(n=>{
+      const num=n.querySelector('.num');
+      if(num&&id.startsWith('s')){
+        const idx=parseInt(id.replace('s',''));
+        if(num.textContent===String(idx).padStart(2,'0'))n.classList.add('active');
+      }
+    });
+  }
+  window.scrollTo(0,0);
+}
+function quizStart(){
+  qi=0;score=0;answered=false;
+  document.getElementById('quizMain').style.display='block';
+  document.getElementById('quizResult').classList.remove('show');
+  renderQ();
+}
+function renderQ(){
+  const q=questions[qi];
+  document.getElementById('qProgressFill').style.width=((qi/questions.length)*100)+'%';
+  document.getElementById('qCount').textContent=(qi+1)+' / '+questions.length;
+  document.getElementById('qText').textContent=q.q;
+  document.getElementById('qExplanation').className='quiz-explanation';
+  document.getElementById('qExplanation').textContent='';
+  document.getElementById('qNextBtn').style.display='none';
+  answered=false;
+  const opts=document.getElementById('qOptions');
+  opts.innerHTML='';
+  q.o.forEach((o,i)=>{
+    const d=document.createElement('div');
+    d.className='quiz-opt';d.textContent=o;
+    d.onclick=()=>answer(i,d);
+    opts.appendChild(d);
+  });
+}
+function answer(i,el){
+  if(answered)return;answered=true;
+  const q=questions[qi];
+  document.querySelectorAll('.quiz-opt').forEach((d,j)=>{
+    if(j===q.a)d.classList.add('correct');
+    else if(j===i)d.classList.add('wrong');
+  });
+  if(i===q.a)score++;
+  const exp=document.getElementById('qExplanation');
+  exp.textContent=q.e;exp.classList.add('show');
+  document.getElementById('qNextBtn').style.display='inline-flex';
+}
+function quizNext(){
+  qi++;
+  if(qi>=questions.length){
+    document.getElementById('quizMain').style.display='none';
+    document.getElementById('quizScore').textContent=score+'/'+questions.length;
+    const pct=Math.round(score/questions.length*100);
+    let c='';
+    if(pct===100)c='완벽해요 🎉 이번 파트 마스터!';
+    else if(pct>=80)c='훌륭해요 👏 거의 다 이해했어요!';
+    else if(pct>=60)c='잘 하셨어요 👍 틀린 챕터를 복습해보세요.';
+    else if(pct>=40)c='절반 통과 ✨ 핵심 챕터를 한 번 더 읽어보세요.';
+    else c='복습이 필요해요 📖 처음부터 다시 읽어보세요.';
+    document.getElementById('quizComment').textContent=pct+'% 정답률 — '+c;
+    document.getElementById('quizResult').classList.add('show');
+  } else { renderQ(); }
+}
+function quizRestart(){quizStart();}
+document.addEventListener('DOMContentLoaded',()=>goTo('s0'));
+
+</script>
+</body>
+</html>

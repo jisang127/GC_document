@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC 13부 — ZGC 핵심 요약</title><link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet"><link rel="stylesheet" href="style.css"></head>
+<body>
+<div id="sidebar">
+  <a class="nav-home" href="index.html">← 목차로</a>
+  <div class="logo"><div class="tag">GC 13부</div><h1>ZGC 핵심 요약</h1></div>
+  <nav>
+    <div class="nav-item active" onclick="goTo('s0')"><span class="num">00</span> 한 줄 요약 & 4대 GC</div>
+    <div class="nav-item" onclick="goTo('s1')"><span class="num">01</span> ZGC 동작 원리</div>
+    <div class="nav-item" onclick="goTo('s2')"><span class="num">02</span> ZGC 발전 타임라인</div>
+    <div class="nav-item" onclick="goTo('s3')"><span class="num">03</span> 핵심 튜닝 옵션 5가지</div>
+    <div class="nav-item" onclick="goTo('s4')"><span class="num">04</span> Full GC & Q&A</div>
+    <div class="nav-item" onclick="goTo('s5')"><span class="num">05</span> 핵심 암기 카드</div>
+    <div class="nav-item" onclick="goTo('quiz')" style="margin-top:10px;border-top:1px solid var(--border);padding-top:14px;"><span class="num">🧪</span> 퀴즈 (20문제)</div>
+  </nav>
+</div>
+<main id="main">
+<div class="section active" id="s0">
+  <div class="section-header"><div class="chip red" style="background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.25);color:var(--danger);">Chapter 00</div><h2>한 줄 요약 &amp; 4대 GC 위치</h2></div>
+  <div class="info-box" style="font-size:14px;font-weight:600;line-height:1.8;">ZGC = "레이턴시에 몰빵한 GC". 힙 사이즈와 무관하게 <strong>Stop-the-World가 항상 1ms 이하</strong>인 컬렉터. 마킹뿐 아니라 리로케이션(객체 이동)까지 컨커런트로 처리한다. 튜닝 옵션은 G1보다 훨씬 적고, 대부분 디폴트로 알아서 동작한다.</div>
+  <div class="info-box green" style="margin-top:12px;">면접 포인트: "ZGC의 가장 큰 특징은 힙 사이즈에 관계없이 Stop-the-World가 1ms 이하라는 것. G1GC가 마킹은 concurrent지만 evacuation은 STW였던 반면, ZGC는 <strong>relocation까지 concurrent</strong>로 처리한다."</div>
+  <div class="card" style="margin-top:20px;">
+    <h3>4대 GC 위치 정리</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>GC</th><th>최적화 목표</th><th>핵심 메커니즘</th></tr></thead><tbody>
+      <tr><td>Serial GC</td><td>단순함</td><td>싱글 스레드</td></tr>
+      <tr><td class="highlight">Parallel GC</td><td><strong>Throughput 몰빵</strong></td><td>멀티 스레드 STW</td></tr>
+      <tr><td class="highlight">G1 GC</td><td>Throughput과 Latency의 밸런스</td><td>Region + MaxGCPauseMillis(기본 200ms)</td></tr>
+      <tr><td class="highlight" style="color:var(--danger);">ZGC</td><td><strong>Latency 몰빵</strong></td><td>마킹 + 리로케이션 모두 Concurrent → STW &lt; 1ms</td></tr>
+    </tbody></table></div>
+    <div class="code-block">Throughput ◀━━━━━━━━━━━━━━━━━━━━━━▶ Latency
+    Parallel     Serial     G1GC          ZGC
+                           (balance)      (몰빵)</div>
+  </div>
+</div>
+<div class="section" id="s1">
+  <div class="section-header"><div class="chip">Chapter 01</div><h2>ZGC 동작 원리</h2></div>
+  <div class="card">
+    <h3>G1GC vs ZGC 비교</h3>
+    <div class="code-block">[기존 G1GC]
+어플 ▓▓▓▓▓▓▓▓▓▓▓ ▓▓▓▓▓ ▓▓▓▓▓▓▓▓▓
+GC  ----marking---█████-----------  ← evacuation은 STW(█)
+                   (STW)
+
+[ZGC]
+어플 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+GC  ──marking──┃──relocation──┃─   ← 거의 다 concurrent
+               ┃&lt;1ms         ┃&lt;1ms   STW는 아주 잠깐만</div>
+    <div class="info-box green">"마킹과 리로케이션 모두 컨커런트하게 진행한다. ZGC는 거의 STW가 없고, 아주 잠깐 STW만 했다가 다시 컨커런트로 진행하는 식으로 동작한다."</div>
+  </div>
+  <div class="card">
+    <h3>핵심 스펙</h3>
+    <div class="cards-2">
+      <div class="card" style="margin-bottom:0;"><h3>공식 커버 범위</h3><p>수백 MB ~ <strong>16TB</strong> 힙. 이 모든 구간에서 STW &lt; 1ms 보장</p></div>
+      <div class="card" style="margin-bottom:0;"><h3>트레이드오프</h3><p>상대적으로 <strong>스루풋은 약간 떨어짐</strong></p></div>
+    </div>
+    <div class="info-box" style="margin-top:12px;">면접 포인트: "ZGC의 STW 1ms 이하 보장은 힙 사이즈가 16TB든 1GB든 동일하다."</div>
+  </div>
+</div>
+<div class="section" id="s2">
+  <div class="section-header"><div class="chip purple">Chapter 02</div><h2>ZGC 발전 타임라인 (꼭 외울 것)</h2></div>
+  <div class="card">
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>JDK 버전</th><th>변화</th></tr></thead><tbody>
+      <tr><td class="highlight">JDK 11</td><td>ZGC가 <strong>실험(experimental) 모드</strong>로 처음 추가. Non-generational</td></tr>
+      <tr><td class="highlight">JDK 15</td><td><strong>Production-ready 선언.</strong> 실험 딱지 떼고 옵션만 켜면 사용 가능</td></tr>
+      <tr><td class="highlight">JDK 21 (LTS)</td><td><strong>Generational ZGC 도입.</strong> Non-gen / Gen 두 모드 공존</td></tr>
+      <tr><td class="highlight">JDK 23</td><td>Generational ZGC가 <strong>디폴트.</strong> Non-gen은 <strong>deprecated</strong></td></tr>
+      <tr><td class="highlight">JDK 24</td><td>Non-generational ZGC <strong>완전 제거</strong>, 관련 옵션도 사라짐</td></tr>
+    </tbody></table></div>
+  </div>
+  <div class="card">
+    <h3>옵션 변천사</h3>
+    <div class="code-block"># JDK 15 ~ 20: ZGC 켜기
+java -XX:+UseZGC ...
+
+# JDK 21 ~ 22: Generational 쓰려면 명시
+java -XX:+UseZGC -XX:+ZGenerational ...
+
+# JDK 23: Generational이 디폴트, +ZGenerational 불필요 (deprecated)
+java -XX:+UseZGC ...
+
+# JDK 24+: 옵션 자체가 제거됨. Generational만 존재
+java -XX:+UseZGC ...</div>
+    <div class="info-box red">실무 시사점: JDK 24+로 올라가면 <span class="inline-code">-XX:+ZGenerational</span> 옵션은 <strong>반드시 제거</strong>해야 함. 안 그러면 unknown option 에러.</div>
+  </div>
+</div>
+<div class="section" id="s3">
+  <div class="section-header"><div class="chip green">Chapter 03</div><h2>핵심 튜닝 옵션 5가지</h2></div>
+  <div class="info-box" style="margin-bottom:20px;">ZGC 철학: "<strong>개발자가 옵션을 거의 안 건드려도 되도록 설계</strong>". 제너레이션 크기 / GC 스레드 수 / Tenuring threshold를 내부적으로 동적 조정.</div>
+  <div class="card">
+    <h3>4-1. MaxHeapSize (가장 핵심)</h3>
+    <div class="code-block">-Xmx16g</div>
+    <p>공식 문서가 "이것 하나만 잘 만져도 된다"고 강조하는 옵션.</p>
+    <div class="info-box yellow" style="margin-top:8px;">힙이 클수록 ZGC 성능 잘 나옴 ("다다익선"). 단, 메모리 비용도 무시 못 함 → 밸런스. GC 로그 보면서 귀납적으로 결정.</div>
+  </div>
+  <div class="card">
+    <h3>4-2. SoftMaxHeapSize (소프트 상한선)</h3>
+    <div class="code-block">-Xmx5g -XX:SoftMaxHeapSize=4g</div>
+    <p>ZGC가 평소엔 4GB 안에서 동작하려고 노력. 스파이크 시 5GB까지 허용.</p>
+    <div class="info-box">의미 있는 조건: <strong>Xms &lt; SoftMaxHeapSize &lt; Xmx</strong>일 때만 효력. 백엔드처럼 Xms==Xmx면 의미 없음.</div>
+  </div>
+  <div class="card">
+    <h3>4-3. Uncommit 관련 (ZUncommit, ZUncommitDelay)</h3>
+    <div class="code-block"># Uncommit 끄기 (백엔드처럼 그 서버에 자바 어플만 도는 환경)
+-XX:-ZUncommit
+# 또는 암묵적으로 끄는 방법: Xms == Xmx로 힙 고정
+-Xms16g -Xmx16g
+
+# Uncommit 딜레이 조정 (디폴트 300초, 너무 짧으면 commit→uncommit 반복으로 CPU 낭비)
+-XX:ZUncommitDelay=300</div>
+  </div>
+  <div class="card">
+    <h3>4-4. AlwaysPreTouch (레이턴시 극한 최적화)</h3>
+    <div class="code-block">-Xms16g -Xmx16g -XX:+AlwaysPreTouch</div>
+    <div class="info-box green">면접 포인트: ZGC + Xms=Xmx + AlwaysPreTouch 조합 = <strong>"레이턴시를 극단까지 짜내는 표준 레시피"</strong>. G1GC 12부에서도 동일한 권장.</div>
+  </div>
+  <div class="card">
+    <h3>4-5. UseLargePages (강력 추천, 단점 거의 없음)</h3>
+    <div class="code-block">[16GB 힙 기준]
+4KB 페이지:  16GB / 4KB  = 약 400만 개 페이지
+2MB 페이지:  16GB / 2MB  = 약 8,000개 페이지
+                              ↓
+              TLB 미스 확률 급감 → 가상-물리 변환 빨라짐
+
+# Large Page 설정 (Linux)
+echo 9216 > /proc/sys/vm/nr_hugepages
+java -XX:+UseZGC -XX:+UseLargePages -Xmx16g ...</div>
+    <div class="info-box">효과: 스루풋 ↑, 레이턴시 ↓, 시작 시간 영향 미미 — 사실상 단점이 거의 없음. ZGC뿐 아니라 G1GC에서도 동일하게 쓸 수 있는 OS 레벨 튜닝.</div>
+  </div>
+  <div class="card">
+    <h3>4-6. ConcGCThreads (이젠 거의 안 건드림)</h3>
+    <div class="code-block">-XX:ConcGCThreads=N</div>
+    <p>JDK 17부터 ZGC가 알아서 동적으로 조정 → 수동 설정 거의 불필요. G1GC에서 ZGC로 마이그레이션할 때 기존 옵션을 그대로 들고 오는 경우, <strong>빼도 된다는 신호</strong>.</p>
+  </div>
+</div>
+<div class="section" id="s4">
+  <div class="section-header"><div class="chip yellow">Chapter 04</div><h2>Full GC &amp; Q&amp;A</h2></div>
+  <div class="card">
+    <h3>Full GC가 ZGC에 있나?</h3>
+    <div class="info-box red">결론: <strong>없다</strong> (전통적 의미의 Full GC는). ZGC는 STW 방식의 Full GC가 존재하지 않음.</div>
+    <div class="code-block">[전통적 Full GC]
+모든 어플 스레드: ████████████████████ (전부 STW)
+
+[ZGC 한계 상황]
+어플 스레드 1: ▓▓▓▓████████▓▓▓▓  (해당 스레드만 stall)
+어플 스레드 2: ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  (정상)
+어플 스레드 3: ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  (정상)</div>
+    <p>객체가 MaxHeap까지 다 차서 더 못 할당하는 상황이 되면 → 해당 어플리케이션 스레드 하나만 stall(일시 중지). 전체 시스템을 멈추는 방식은 없음.</p>
+  </div>
+  <div class="card">
+    <h3>ZGC vs Shenandoah</h3>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>항목</th><th>ZGC</th><th>Shenandoah</th></tr></thead><tbody>
+      <tr><td>목표</td><td>저레이턴시</td><td>저레이턴시 (유사)</td></tr>
+      <tr><td>Oracle JDK 포함</td><td><strong>✅</strong></td><td>❌</td></tr>
+      <tr><td>OpenJDK 포함</td><td>✅</td><td>✅</td></tr>
+    </tbody></table></div>
+  </div>
+  <div class="card">
+    <h3>백엔드라면 G1 vs ZGC?</h3>
+    <p style="line-height:1.8;">G1GC가 밸런스 잡혀서 무난하게 쓰기 좋음. 글로벌급 또는 국가급 트래픽 서비스: ZGC 적극 고려. 트래픽이 정말 글로벌급으로 많지 않다면, 비용 걱정하면서 ZGC 힙 키우기보다 G1GC로도 비벼볼 수 있다.</p>
+  </div>
+  <div class="card">
+    <h3>튜닝 미니멈 레시피 (백엔드 기준)</h3>
+    <div class="code-block">java     -XX:+UseZGC     -Xms16g -Xmx16g \          # 힙 고정 (uncommit 자연스럽게 비활성)
+    -XX:+AlwaysPreTouch \       # 페이지 폴트 제거
+    -XX:+UseLargePages \        # TLB 미스 감소
+    ...</div>
+    <p>OS 쪽에선 <span class="inline-code">nr_hugepages</span>만 충분히 잡아두면 끝.</p>
+  </div>
+</div>
+<div class="section" id="s5">
+  <div class="section-header"><div class="chip">Chapter 05</div><h2>핵심 암기 카드</h2></div>
+  <div class="card">
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>질문</th><th>답</th></tr></thead><tbody>
+      <tr><td>ZGC의 STW 시간 보장?</td><td><strong>힙 사이즈와 무관하게 &lt; 1ms</strong></td></tr>
+      <tr><td>ZGC 커버 힙 사이즈 범위</td><td>수백 MB ~ <strong>16TB</strong></td></tr>
+      <tr><td>ZGC가 G1과 다른 핵심?</td><td><strong>Relocation(객체 이동)까지 Concurrent</strong></td></tr>
+      <tr><td>Generational ZGC가 디폴트가 된 JDK</td><td><strong>JDK 23</strong></td></tr>
+      <tr><td>Non-Gen ZGC가 제거된 JDK</td><td><strong>JDK 24</strong></td></tr>
+      <tr><td>가장 핵심 튜닝 옵션</td><td><span class="inline-code">-Xmx</span> (MaxHeapSize)</td></tr>
+      <tr><td>레이턴시 극단 최적화 트리오</td><td><span class="inline-code">Xms=Xmx</span> • <span class="inline-code">AlwaysPreTouch</span> • <span class="inline-code">UseLargePages</span></td></tr>
+      <tr><td>ZGC에 Full GC 있나?</td><td><strong>STW Full GC 없음.</strong> 스레드 단위 stall만</td></tr>
+    </tbody></table></div>
+  </div>
+  <div class="card" style="margin-top:16px;">
+    <h3>ZGC가 내부적으로 알아서 동적 조정하는 것들</h3>
+    <p style="line-height:1.8;">제너레이션 크기 / GC 스레드 수 / Tenuring threshold (Young→Old 승격 기준)</p>
+    <div class="info-box green">트래픽 많은 회사(네카라쿠배, 글로벌 빅테크)는 점점 G1 → ZGC로 전환 추세. "ZGC 직접 써보고 벤치마크 돌려보는 경험"을 어필하면 플러스.</div>
+  </div>
+</div>
+<div class="section" id="quiz">
+  <div class="section-header"><div class="chip">퀴즈</div><h2>실력 확인 — 20문제</h2><p>13부 핵심 개념 점검.</p></div>
+  <div id="quizMain">
+    <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="qProgressFill" style="width:0%"></div></div>
+    <div class="quiz-q-count" id="qCount">1 / 20</div>
+    <div class="quiz-question" id="qText"></div>
+    <div class="quiz-options" id="qOptions"></div>
+    <div class="quiz-explanation" id="qExplanation"></div>
+    <button class="btn btn-primary" id="qNextBtn" style="display:none;" onclick="quizNext()">다음 문제 →</button>
+  </div>
+  <div class="quiz-result" id="quizResult">
+    <div class="score-num" id="quizScore"></div><p id="quizComment"></p>
+    <button class="btn btn-ghost" style="margin-top:24px;" onclick="quizRestart()">다시 풀기</button>
+  </div>
+</div>
+</main>
+<script>const questions = [{"q": "ZGC의 핵심 특징을 한 문장으로 설명하면?", "o": ["높은 처리량을 위해 STW 시간이 길다", "힙 사이즈와 무관하게 Stop-the-World가 항상 1ms 이하이다", "Young Gen만 Concurrent로 처리한다", "최대 4TB 힙만 지원한다"], "a": 1, "e": "ZGC는 힙 사이즈(수백 MB ~ 16TB)와 무관하게 Stop-the-World가 항상 1ms 이하인 컬렉터다."}, {"q": "ZGC가 G1GC와 가장 다른 핵심 차이는?", "o": ["리전 기반 메모리 관리", "마킹만 Concurrent로 처리", "Relocation(객체 이동)까지 Concurrent로 처리", "Young/Old를 구분하지 않음"], "a": 2, "e": "G1GC는 마킹은 concurrent지만 evacuation(객체 이동)은 STW였다. ZGC는 relocation까지 concurrent로 처리한다는 것이 핵심 차이다."}, {"q": "ZGC가 처음 Production-ready로 선언된 JDK 버전은?", "o": ["JDK 11", "JDK 15", "JDK 17", "JDK 21"], "a": 1, "e": "JDK 11에서 experimental 모드로 추가되었고, JDK 15에서 Production-ready로 선언되어 실험 딱지를 뗐다."}, {"q": "Generational ZGC가 디폴트가 된 JDK 버전은?", "o": ["JDK 17", "JDK 21", "JDK 23", "JDK 25"], "a": 2, "e": "JDK 21에서 Generational ZGC가 도입되어 Non-gen / Gen 두 모드가 공존했고, JDK 23에서 Generational ZGC가 디폴트가 됐다(Non-gen은 deprecated)."}, {"q": "Non-generational ZGC가 완전히 제거된 JDK 버전은?", "o": ["JDK 21", "JDK 22", "JDK 23", "JDK 24"], "a": 3, "e": "JDK 24에서 Non-generational ZGC가 완전히 제거되고 관련 옵션도 사라졌다."}, {"q": "JDK 24+로 업그레이드 시 반드시 제거해야 하는 옵션은?", "o": ["-XX:+UseZGC", "-XX:+ZGenerational", "-XX:+AlwaysPreTouch", "-Xmx"], "a": 1, "e": "JDK 24+에서 -XX:+ZGenerational 옵션 자체가 제거됐다. 이 옵션을 남겨두면 unknown option 에러가 발생한다."}, {"q": "ZGC 공식 문서가 '이것 하나만 잘 만져도 된다'고 강조하는 옵션은?", "o": ["-XX:ConcGCThreads", "-XX:SoftMaxHeapSize", "-Xmx (MaxHeapSize)", "-XX:ZUncommitDelay"], "a": 2, "e": "-Xmx(MaxHeapSize)가 ZGC에서 공식 문서가 가장 핵심으로 강조하는 옵션이다. 힙이 클수록 ZGC 성능이 잘 나온다(다다익선)"}, {"q": "SoftMaxHeapSize가 의미 있는 조건은?", "o": ["Xms == Xmx인 경우", "Xms < SoftMaxHeapSize < Xmx인 경우", "항상 의미 있음", "ZGC를 사용하는 경우에만"], "a": 1, "e": "SoftMaxHeapSize는 Xms < SoftMaxHeapSize < Xmx일 때만 효력이 있다. 백엔드처럼 Xms==Xmx로 힙을 고정하면 의미가 없다."}, {"q": "ZGC에서 Uncommit을 끄는 두 가지 방법은?", "o": ["-XX:-ZUncommit 옵션 또는 Xms=Xmx로 힙 고정 (어차피 uncommit 발생 안 함)", "-XX:+ZUncommit 옵션 또는 ConcGCThreads=0", "-XX:ZUncommitDelay=0 또는 UseLargePages", "AlwaysPreTouch 또는 SoftMaxHeapSize"], "a": 0, "e": "Uncommit을 끄는 방법은 ① -XX:-ZUncommit 옵션 ② Xms==Xmx로 힙 고정(어차피 커밋 변동이 없어서 uncommit 발생 안 함) 두 가지다."}, {"q": "레이턴시 극단 최적화 트리오 조합은?", "o": ["MaxGCPauseMillis + G1ReservePercent + ConcGCThreads", "Xms=Xmx + AlwaysPreTouch + UseLargePages", "UseZGC + SoftMaxHeapSize + ZUncommitDelay", "G1GC + Xmx + MaxGCPauseMillis"], "a": 1, "e": "ZGC에서 레이턴시를 극단까지 짜내는 표준 레시피는 Xms=Xmx(힙 고정) + AlwaysPreTouch(페이지 폴트 제거) + UseLargePages(TLB 미스 감소)의 조합이다."}, {"q": "UseLargePages를 사용하면 TLB 미스가 줄어드는 이유는?", "o": ["힙 크기가 줄어들어서", "4KB 페이지 대신 2MB 페이지를 사용해 총 페이지 수가 대폭 줄어들어서", "GC 스레드 수가 증가해서", "Concurrent Marking이 빨라져서"], "a": 1, "e": "16GB 힙 기준 4KB 페이지는 약 400만 개, 2MB 페이지는 약 8,000개다. 페이지 수가 대폭 줄어들어 TLB 미스 확률이 급감하고 가상-물리 변환이 빨라진다."}, {"q": "ZGC에서 Full GC가 없는 대신 한계 상황에서 어떻게 동작하는가?", "o": ["모든 어플 스레드를 STW", "해당 어플리케이션 스레드 하나만 stall(일시 중지)", "GC가 두 배 빠르게 동작", "OOM이 즉시 발생"], "a": 1, "e": "ZGC는 STW 방식의 Full GC가 존재하지 않는다. 객체가 MaxHeap까지 다 차면 할당을 요청한 해당 어플리케이션 스레드 하나만 stall된다. 전체 시스템을 멈추는 방식은 없다."}, {"q": "ZGC에서 ConcGCThreads를 수동으로 설정할 필요가 거의 없는 이유는?", "o": ["ZGC는 GC 스레드가 없어서", "JDK 17부터 ZGC가 알아서 동적으로 조정하기 때문", "G1GC와 달리 스레드가 1개뿐이라서", "Generational ZGC에서 이 옵션이 제거됐기 때문"], "a": 1, "e": "JDK 17부터 ZGC가 GC 스레드 수를 알아서 동적으로 조정한다. Generational ZGC에서는 더 유연하게 동작해 더더욱 불필요하다."}, {"q": "ZGC가 내부적으로 자동 조정하는 것이 아닌 것은?", "o": ["제너레이션 크기", "GC 스레드 수", "Tenuring threshold", "-Xmx(최대 힙 크기)"], "a": 3, "e": "ZGC는 제너레이션 크기, GC 스레드 수, Tenuring threshold(Young→Old 승격 기준)를 내부적으로 동적 조정한다. -Xmx는 개발자가 직접 설정해야 한다."}, {"q": "ZGC와 Shenandoah의 차이점은?", "o": ["둘 다 Oracle JDK에 포함", "ZGC는 Oracle/OpenJDK 모두 지원, Shenandoah는 OpenJDK 전용", "Shenandoah가 더 낮은 레이턴시", "ZGC는 Gen이 없음"], "a": 1, "e": "ZGC는 Oracle JDK와 OpenJDK 모두에 포함되지만, Shenandoah는 OpenJDK 전용이며 Oracle JDK에는 포함되지 않는다."}, {"q": "ZUncommitDelay의 디폴트 값은?", "o": ["30초", "60초", "300초 (5분)", "600초"], "a": 2, "e": "ZUncommitDelay의 디폴트는 300초(5분)이다. 커밋한 메모리를 N초 동안 쓰지 않으면 OS에 반환한다. 너무 짧으면 uncommit→commit 반복으로 CPU 낭비가 발생해 늘리는 방향으로 튜닝한다."}, {"q": "AlwaysPreTouch의 트레이드오프는?", "o": ["런타임 레이턴시가 증가", "GC 빈도가 증가", "JVM 초기 로딩(부팅) 시간이 증가", "힙 크기가 고정됨"], "a": 2, "e": "AlwaysPreTouch는 JVM 시작 시 모든 페이지를 한 번씩 터치해 미리 매핑하므로 초기 로딩 속도가 길어진다. 장점은 런타임 page fault 제거로 안정적인 저레이턴시다."}, {"q": "ZGC의 커버 힙 사이즈 범위는?", "o": ["1GB ~ 4TB", "100MB ~ 8TB", "수백 MB ~ 16TB", "1GB ~ 64TB"], "a": 2, "e": "ZGC의 공식 커버 범위는 수백 MB ~ 16TB이며, 이 모든 구간에서 STW < 1ms를 보장한다."}, {"q": "4대 GC를 Throughput → Latency 순서로 나열하면?", "o": ["Serial → Parallel → G1GC → ZGC", "Parallel → Serial → G1GC → ZGC", "ZGC → G1GC → Serial → Parallel", "Parallel → G1GC → Serial → ZGC"], "a": 1, "e": "Throughput ◀─ Parallel → Serial → G1GC → ZGC ─▶ Latency. Parallel GC가 가장 Throughput 지향, ZGC가 가장 Latency 지향이다."}, {"q": "백엔드에서 G1GC와 ZGC 중 어느 것을 선택하는 것이 일반적으로 권장되는가?", "o": ["항상 ZGC가 더 좋다", "트래픽이 많지 않으면 G1GC가 밸런스 잡혀서 무난하고, 글로벌/국가급 트래픽이면 ZGC 적극 고려", "항상 G1GC가 더 좋다", "레이턴시가 중요하면 항상 ZGC"], "a": 1, "e": "G1GC가 밸런스 잡혀서 무난하게 쓰기 좋다. 글로벌급 또는 국가급 트래픽 서비스라면 ZGC를 적극 고려한다. 트래픽이 그렇게 많지 않다면 비용 걱정하면서 ZGC 힙을 키우기보다 G1GC로도 충분할 수 있다."}];
+
+let qi=0,score=0,answered=false;
+function goTo(id){
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  if(id==='quiz'){
+    document.getElementById('quiz').classList.add('active');
+    document.querySelectorAll('.nav-item').forEach(n=>{if(n.textContent.includes('퀴즈'))n.classList.add('active');});
+    quizStart();
+  } else {
+    document.getElementById(id).classList.add('active');
+    const navItems=document.querySelectorAll('.nav-item');
+    navItems.forEach(n=>{
+      const num=n.querySelector('.num');
+      if(num&&id.startsWith('s')){
+        const idx=parseInt(id.replace('s',''));
+        if(num.textContent===String(idx).padStart(2,'0'))n.classList.add('active');
+      }
+    });
+  }
+  window.scrollTo(0,0);
+}
+function quizStart(){qi=0;score=0;answered=false;document.getElementById('quizMain').style.display='block';document.getElementById('quizResult').classList.remove('show');renderQ();}
+function renderQ(){const q=questions[qi];document.getElementById('qProgressFill').style.width=((qi/questions.length)*100)+'%';document.getElementById('qCount').textContent=(qi+1)+' / '+questions.length;document.getElementById('qText').textContent=q.q;document.getElementById('qExplanation').className='quiz-explanation';document.getElementById('qExplanation').textContent='';document.getElementById('qNextBtn').style.display='none';answered=false;const opts=document.getElementById('qOptions');opts.innerHTML='';q.o.forEach((o,i)=>{const d=document.createElement('div');d.className='quiz-opt';d.textContent=o;d.onclick=()=>answer(i,d);opts.appendChild(d);});}
+function answer(i,el){if(answered)return;answered=true;const q=questions[qi];document.querySelectorAll('.quiz-opt').forEach((d,j)=>{if(j===q.a)d.classList.add('correct');else if(j===i)d.classList.add('wrong');});if(i===q.a)score++;const exp=document.getElementById('qExplanation');exp.textContent=q.e;exp.classList.add('show');document.getElementById('qNextBtn').style.display='inline-flex';}
+function quizNext(){qi++;if(qi>=questions.length){document.getElementById('quizMain').style.display='none';document.getElementById('quizScore').textContent=score+'/'+questions.length;const pct=Math.round(score/questions.length*100);let c='';if(pct===100)c='완벽해요 🎉';else if(pct>=80)c='훌륭해요 👏';else if(pct>=60)c='잘 하셨어요 👍 틀린 챕터를 복습해보세요.';else if(pct>=40)c='절반 통과 ✨ 한 번 더 읽어보세요.';else c='복습이 필요해요 📖';document.getElementById('quizComment').textContent=pct+'% 정답률 — '+c;document.getElementById('quizResult').classList.add('show');}else{renderQ();}}
+function quizRestart(){quizStart();}
+document.addEventListener('DOMContentLoaded',()=>goTo('s0'));
+</script>
+</body></html>

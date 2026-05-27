@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC 3부 — GC 필요성 & 튜닝</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav id="sidebar">
+  <a class="nav-home" href="index.html">← 목차로</a>
+  <div class="logo"><div class="tag">GC 3부</div><h1 style="font-family:var(--display);font-size:22px;color:#fff;margin-top:4px;">GC 필요성 & 튜닝</h1></div>
+  <nav>
+<div class="nav-item active" onclick="goTo('s0')"><span class="num">00</span> 개요</div>
+<div class="nav-item" onclick="goTo('s1')"><span class="num">01</span> GC가 왜 등장했나</div>
+<div class="nav-item" onclick="goTo('s2')"><span class="num">02</span> GC의 역할</div>
+<div class="nav-item" onclick="goTo('s3')"><span class="num">03</span> GC 주요 테크닉</div>
+<div class="nav-item" onclick="goTo('s4')"><span class="num">04</span> 언제 튜닝이 필요한가</div>
+<div class="nav-item" onclick="goTo('s5')"><span class="num">05</span> 암달의 법칙</div>
+<div class="nav-item" onclick="goTo('s6')"><span class="num">06</span> JDK 25의 네 가지 GC</div>
+<div class="nav-item" onclick="goTo('s7')"><span class="num">07</span> Ergonomics</div>
+<div class="nav-item" onclick="goTo('s8')"><span class="num">08</span> 두 가지 목표 옵션</div>
+<div class="nav-item" onclick="goTo('s9')"><span class="num">09</span> -Xms / -Xmx</div>
+<div class="nav-item" onclick="goTo('s10')"><span class="num">10</span> 서버 어플리케이션</div>
+    <div class="nav-item" onclick="goTo('quiz')" style="margin-top:10px;border-top:1px solid var(--border);padding-top:14px;"><span class="num">🧪</span> 퀴즈 (20문제)</div>
+  </nav>
+</nav>
+<main id="main">
+<div class="section active" id="s0">
+  <div class="section-header"><div class="chip">GC 3부</div><h2>GC는 왜 필요한가,<br>언제·왜 튜닝이 필요한가</h2><p>C++의 수동 메모리 관리부터 Ergonomics와 -Xms/-Xmx까지.</p></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+    <div class="card" style="border-color:rgba(239,68,68,.3);"><h3 style="color:var(--danger);">C++ 문제</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">delete 누락 → 메모리 누수. GC가 이를 자동화</p></div>
+    <div class="card" style="border-color:rgba(245,158,11,.3);"><h3>Ergonomics</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">JVM이 환경에 맞게 설정을 자동 선택·동적 조정</p></div>
+    <div class="card" style="border-color:rgba(16,185,129,.3);"><h3>튜닝 시점</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">대규모 트래픽 서버에서만 효용. No silver bullet.</p></div>
+  </div>
+</div>
+<div class="section" id="s1">
+  <div class="section-header"><div class="chip">Chapter 01</div><h2>GC가 왜 등장했나</h2><p>C++의 수동 메모리 관리 고통.</p></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;">
+    <div class="card" style="border-color:rgba(239,68,68,.25);"><h3 style="color:var(--danger);">C++ 방식 (수동)</h3>
+      <div class="code-block">void allocate() {
+  int* p = new int(10);
+  // ... 사용 ...
+  delete p;  // 깜빡하면?
+}</div>
+      <p style="font-size:12px;color:var(--text-dim);">delete 누락 → 힙 객체 영원히 남음 = <strong style="color:var(--danger);">메모리 누수</strong></p></div>
+    <div class="card" style="border-color:rgba(16,185,129,.25);"><h3 style="color:var(--accent3);">Java 방식 (GC)</h3>
+      <div class="code-block">static void allocate() {
+  Object obj = new Object();
+  // ... 사용 ...
+}  // GC가 나중에 수거</div>
+      <p style="font-size:12px;color:var(--text-dim);">개발자는 해제 신경 안 씀. 단 <strong>GC 검사 비용</strong> 발생.</p></div>
+  </div>
+  <div class="info-box">GC 오버헤드: "이 객체가 살아 있나?"를 검사하는 비용. 이 오버헤드를 줄이는 것이 GC를 공부하는 이유.</div>
+</div>
+<div class="section" id="s2">
+  <div class="section-header"><div class="chip">Chapter 02</div><h2>GC의 역할</h2><p>OS로부터 메모리 확보·반납까지 4가지 역할.</p></div>
+  <div class="card"><h3>GC가 하는 일 4가지</h3>
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <div style="display:flex;gap:12px;padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;"><span style="color:var(--accent);font-weight:700;font-family:var(--mono);font-size:11px;min-width:16px;">1</span><span>OS로부터 메모리 영역 확보 (필요할 때마다 점차 늘림)</span></div>
+      <div style="display:flex;gap:12px;padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;"><span style="color:var(--accent);font-weight:700;font-family:var(--mono);font-size:11px;min-width:16px;">2</span><span>확보된 영역 안에서 어플리케이션의 객체 생성을 받쳐줌 (미리 뭉텅이로 확보)</span></div>
+      <div style="display:flex;gap:12px;padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;"><span style="color:var(--accent);font-weight:700;font-family:var(--mono);font-size:11px;min-width:16px;">3</span><span>사용 안 되는 객체 회수 + 콤팩션 (연속된 free 공간 확보)</span></div>
+      <div style="display:flex;gap:12px;padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;"><span style="color:var(--accent);font-weight:700;font-family:var(--mono);font-size:11px;min-width:16px;">4</span><span>사용 안 하는 영역은 OS에 반납 (다른 프로세스가 쓸 수 있게)</span></div>
+    </div></div>
+</div>
+<div class="section" id="s3">
+  <div class="section-header"><div class="chip">Chapter 03</div><h2>GC 주요 테크닉</h2></div>
+  <div class="card"><h3>3가지 핵심 테크닉</h3>
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div style="border:1px solid rgba(0,212,255,.2);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent);margin-bottom:6px;">① 세대별 청소 (Generational Collection)</div>
+        <p style="font-size:13px;color:var(--text-dim);">힙을 Young/Old로 나눔. 대부분 객체는 빨리 죽는다는 경험칙. 매번 전체 검사 대신 객체가 많이 죽는 Young에 집중.</p>
+      </div>
+      <div style="border:1px solid rgba(124,58,237,.2);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent2);margin-bottom:6px;">② 핫스팟 집중 (Focus on densely populated area)</div>
+        <p style="font-size:13px;color:var(--text-dim);">객체가 많이 몰린 영역만 핀셋처럼 집어서 GC 수행. 전체 무차별 검사 대신 효율 좋은 곳만.</p>
+      </div>
+      <div style="border:1px solid rgba(16,185,129,.2);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent3);margin-bottom:6px;">③ 병렬화</div>
+        <p style="font-size:13px;color:var(--text-dim);">GC 스레드를 여러 개 띄워 GC 자체를 빨리 끝내거나, 일부 GC 작업을 앱 코드와 동시 수행(Concurrent).</p>
+      </div>
+    </div></div>
+</div>
+<div class="section" id="s4">
+  <div class="section-header"><div class="chip">Chapter 04</div><h2>언제 GC 튜닝이<br>필요한가</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>시스템 규모에 따른 판단</h3>
+    <table class="data-table"><thead><tr><th>규모</th><th>판단</th></tr></thead>
+    <tbody>
+      <tr><td>토이/사내 저트래픽</td><td>디폴트로 충분. 억지로 튜닝하면 시간 낭비</td></tr>
+      <tr><td class="highlight">대규모 백엔드 (MAU 수백만, TPS 1000+)</td><td>GC 선택·튜닝으로 큰 성능 향상 가능</td></tr>
+    </tbody></table></div>
+  <div class="info-box green">✓ 면접 포인트: <strong>"GC 튜닝은 언제나 필요하고 중요한가요?"</strong> → 아니다. 이런 균형 잡힌 애티튜드 자체가 중요한 신호.</div>
+</div>
+<div class="section" id="s5">
+  <div class="section-header"><div class="chip">Chapter 05</div><h2>암달의 법칙</h2><p>GC가 순차 처리 부분이면 코어를 늘려도 전체 성능이 제한된다.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>암달의 법칙 (Amdahl's Law)</h3>
+    <div class="info-box purple" style="margin-bottom:14px;"><strong>어떤 문제에서 병렬을 통한 성능 향상은 해당 문제의 순차적인 부분에 의해 제한된다.</strong></div>
+    <div class="code-block">프로그램 전체:
+[──────────병렬화 가능──────────][순차]
+                                   ↑ 이 부분이 병목
+병렬화 가능한 부분을 아무리 잘 쪼개도,
+순차 영역 길이가 전체 성능 향상의 상한이 된다.</div></div>
+  <div class="info-box">대규모 시스템에서는 GC 오버헤드를 조금만 줄여도 캐시·Redis 같은 다른 최적화 못지않게 큰 스루풋 향상. 이게 GC를 깊이 배우는 핵심 이유.</div>
+</div>
+<div class="section" id="s6">
+  <div class="section-header"><div class="chip">Chapter 06</div><h2>JDK 25의<br>네 가지 GC</h2></div>
+  <div class="card"><h3>GC 종류 비교</h3>
+    <table class="data-table"><thead><tr><th>GC</th><th>특징</th><th>적합 시나리오</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">Serial GC</td><td>GC 스레드 1개, 단순</td><td>힙 &lt; 100MB, 싱글코어</td></tr>
+      <tr><td class="highlight">Parallel GC</td><td>병렬 동작, STW 위주</td><td>스루풋(Throughput) 우선</td></tr>
+      <tr><td class="highlight">G1 GC</td><td>병렬 + 동시 + Region 기반</td><td><strong>JDK 9~25 서버 클래스 디폴트</strong></td></tr>
+      <tr><td class="highlight">ZGC</td><td>거의 100% Concurrent</td><td>초저지연 (1ms 미만 STW)</td></tr>
+    </tbody></table>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">서버 클래스 기준: CPU ≥ 2코어 AND 물리 메모리 > 1792MB. 요즘 노트북/맥북은 무조건 만족 → 그냥 자바 띄우면 G1GC.</div></div>
+</div>
+<div class="section" id="s7">
+  <div class="section-header"><div class="chip">Chapter 07</div><h2>Ergonomics</h2><p>JVM의 자동 최적화 메커니즘.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Ergonomics의 두 역할</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div style="border:1px solid rgba(0,212,255,.2);border-radius:6px;padding:14px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent);margin-bottom:8px;">① 디폴트 설정 선택</div>
+        <p style="font-size:12px;color:var(--text-dim);line-height:1.7;">GC 종류 / 힙 사이즈 / GC 스레드 수 / JIT 컴파일러</p>
+      </div>
+      <div style="border:1px solid rgba(124,58,237,.2);border-radius:6px;padding:14px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent2);margin-bottom:8px;">② 실행 중 동적 조정</div>
+        <p style="font-size:12px;color:var(--text-dim);line-height:1.7;">목표 옵션 기준으로 힙 사이즈와 GC 파라미터를 자동 조정</p>
+      </div>
+    </div></div>
+  <div class="card"><h3>디폴트 힙 사이즈 (16GB RAM 예시)</h3>
+    <table class="data-table"><thead><tr><th>옵션</th><th>디폴트</th><th>16GB 예시</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">InitialHeapSize (-Xms)</td><td>RAM / 64</td><td>250 MB</td></tr>
+      <tr><td class="highlight">MaxHeapSize (-Xmx)</td><td>RAM / 4</td><td>4 GB</td></tr>
+      <tr><td class="highlight">MinHeapSize</td><td>매우 작게</td><td>8 MB</td></tr>
+    </tbody></table></div>
+</div>
+<div class="section" id="s8">
+  <div class="section-header"><div class="chip">Chapter 08</div><h2>두 가지 목표 옵션</h2><p>Pause Time vs Throughput — 서로 반대 방향으로 움직인다.</p></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;">
+    <div class="card" style="border-color:rgba(0,212,255,.25);"><h3>① MaxGCPauseMillis</h3>
+      <div class="code-block" style="margin-bottom:10px;">-XX:MaxGCPauseMillis=500</div>
+      <p style="font-size:12px;color:var(--text-dim);line-height:1.7;">STW 시간 상한 목표. 초과 시 힙 <strong style="color:var(--accent);">↓</strong> (객체 수 ↓ → 1회 GC 시간 ↓)</p></div>
+    <div class="card" style="border-color:rgba(16,185,129,.25);"><h3 style="color:var(--accent3);">② GCTimeRatio</h3>
+      <div class="code-block" style="margin-bottom:10px;">-XX:GCTimeRatio=99  → GC 1%</div>
+      <p style="font-size:12px;color:var(--text-dim);line-height:1.7;">스루풋 목표. 비율 = 1/(1+N). 미달 시 힙 <strong style="color:var(--accent3);">↑</strong> (GC 빈도 ↓ → 앱 시간 비율 ↑)</p></div>
+  </div>
+  <div class="info-box yellow">⚠️ <strong>핵심 함정</strong>: 10초짜리 GC를 반으로 나눠 5초씩 두 번 해도 합이 10초가 아님. GC 한 번마다 고정 비용(STW 진입/종료, 루트 스캔, 동기화 등) 때문에 7초씩 두 번 = 14초. 빈도가 늘면 누적 GC 시간이 늘어난다.</div>
+</div>
+<div class="section" id="s9">
+  <div class="section-header"><div class="chip">Chapter 09</div><h2>-Xms / -Xmx</h2><p>초기 힙과 최대 힙 설정. Reserve와 Commit의 차이.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Reserve vs Commit</h3>
+    <table class="data-table"><thead><tr><th></th><th>의미</th><th>RAM 관계</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">Reserve (예약)</td><td>가상 주소 공간을 연속된 영역으로 찜</td><td>무관 — RAM 할당 X</td></tr>
+      <tr><td class="highlight">Commit (커밋)</td><td>그 영역에 읽기/쓰기 자격 부여</td><td>매핑 가능 상태 (즉시 할당은 X)</td></tr>
+      <tr><td class="highlight">실제 RAM 매핑</td><td>데이터 읽고/쓸 때 페이지 폴트 시점</td><td>이때 처음 프레임 단위로 할당</td></tr>
+    </tbody></table></div>
+</div>
+<div class="section" id="s10">
+  <div class="section-header"><div class="chip">Chapter 10</div><h2>서버 어플리케이션의<br>반전 — -Xms = -Xmx</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>백엔드 서버 가이드라인</h3>
+    <div class="code-block">java -Xms4g -Xmx4g -jar app.jar</div>
+    <div class="info-box green" style="margin-top:12px;margin-bottom:0;">백엔드 서버는 항상 -Xms와 -Xmx를 <strong>같은 값</strong>으로 설정한다.</div></div>
+  <div class="card"><h3>왜 같게 잡나? (면접 포인트)</h3>
+    <table class="data-table"><thead><tr><th>이유</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">자원 데디케이션</td><td>서버 머신의 메모리를 JVM이 거의 다 쓴다. 다른 프로세스와 나눠 쓸 일 없음</td></tr>
+      <tr><td class="highlight">운영 예측성</td><td>힙이 늘었다 줄었다 하면 실제 힙 사이즈 예측이 어렵다</td></tr>
+      <tr><td class="highlight">GC Pause Time 감소</td><td>확장/축소 자체도 JVM이 CPU를 쓰는 일. 같게 두면 이 비용 사라짐</td></tr>
+      <tr><td class="highlight">OOM 예방</td><td>나중에 추가 commit하다 OS가 거절할 위험 제거</td></tr>
+    </tbody></table>
+    <div class="info-box yellow" style="margin-top:12px;margin-bottom:0;">결과적으로 Ergonomics의 동적 조정이 사실상 무력화됨. 백엔드 개발자는 개념만 잡고, 실전에서는 -Xms = -Xmx 잘 잡는 것이 80%.</div></div>
+</div>
+<div id="quiz-section" style="display:none;">
+  <div class="section-header"><div class="chip">퀴즈</div><h2>실력 확인 — 20문제</h2><p>3부 핵심 개념 점검.</p></div>
+  <div id="quizMain">
+    <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="qProgressFill" style="width:0%"></div></div>
+    <div class="quiz-q-count" id="qCount">1 / 20</div>
+    <div class="quiz-question" id="qText"></div>
+    <div class="quiz-options" id="qOptions"></div>
+    <div class="quiz-explanation" id="qExplanation"></div>
+    <button class="btn btn-primary" id="qNextBtn" style="display:none;" onclick="quizNext()">다음 문제 →</button>
+  </div>
+  <div class="quiz-result" id="quizResult">
+    <div class="score-num" id="quizScore"></div>
+    <p id="quizComment"></p>
+    <button class="btn btn-ghost" style="margin-top:24px;" onclick="quizRestart()">다시 풀기</button>
+  </div>
+</div>
+</main>
+<script>
+const questions = [{"q": "GC가 등장한 근본적인 이유는?", "opts": ["CPU 성능 향상", "C/C++의 수동 메모리 해제 부담과 누수 문제 해결", "네트워크 성능 향상", "멀티스레딩 지원"], "ans": 1, "exp": "C/C++에서 <strong>delete 누락으로 인한 메모리 누수</strong>가 개발의 큰 부담이었다. Java의 GC는 이를 자동화하지만 그 자체가 런타임 오버헤드를 발생시킨다."}, {"q": "GC가 하는 일 4가지에 해당하지 않는 것은?", "opts": ["OS로부터 메모리 영역 확보", "객체 생성마다 OS에 메모리 요청", "사용 안 되는 객체 회수 + 콤팩션", "사용 안 하는 영역 OS에 반납"], "ans": 1, "exp": "GC는 <strong>미리 뭉텅이로 확보</strong>해두고 어플리케이션이 그 안에서 할당하는 구조. 객체 생성마다 OS에 요청하는 것이 아니다."}, {"q": "GC 튜닝이 반드시 필요한 상황은?", "opts": ["모든 자바 어플리케이션", "토이 프로젝트", "대규모 트래픽 처리 서버 (MAU 수백만, TPS 1000+)", "로컬 개발 환경"], "ans": 2, "exp": "<strong>No silver bullet</strong>. 소규모/사내 시스템은 디폴트로 충분하다. GC 튜닝의 효용은 대규모 트래픽이 들어오는 서버에서만 크게 나타난다."}, {"q": "암달의 법칙(Amdahl's Law)이 GC와 관련된 이유는?", "opts": ["GC가 병렬화 가능한 부분이기 때문", "GC(순차 처리 부분)가 병목이 되면 코어를 늘려도 전체 성능이 제한되기 때문", "GC는 항상 순차적이어서 빠르기 때문", "암달의 법칙은 GC와 무관"], "ans": 1, "exp": "GC가 순차적(STW)이면 프로세서를 아무리 늘려도 GC 시간이 전체 성능의 상한이 된다. 대규모 시스템에서 GC 비율이 작더라도 <strong>코어 수가 많아질수록 GC가 병목</strong>이 된다."}, {"q": "JDK 9~25에서 서버 클래스 머신의 디폴트 GC는?", "opts": ["Serial GC", "Parallel GC", "G1 GC", "ZGC"], "ans": 2, "exp": "JDK 5~8까지는 Parallel GC가 서버 클래스 디폴트였으나, <strong>JDK 9부터는 G1 GC</strong>가 디폴트가 되었다."}, {"q": "서버 클래스 머신 판정 기준은?", "opts": ["CPU 코어 ≥ 4 AND RAM ≥ 4GB", "CPU 코어 ≥ 2 AND RAM ≥ 1792MB", "64비트 OS", "네트워크 카드 존재"], "ans": 1, "exp": "<strong>CPU 코어 ≥ 2 AND 물리 메모리 > 1792MB</strong>. 이 조건을 만족하면 서버 클래스 → G1GC 디폴트. 요즘 노트북/맥북은 무조건 서버 클래스."}, {"q": "Ergonomics가 하는 두 가지 역할은?", "opts": ["GC 수행 + 메모리 해제", "디폴트 설정 선택 + 실행 중 동적 조정", "힙 크기 고정 + 스레드 수 고정", "JIT 컴파일 + 클래스 로딩"], "ans": 1, "exp": "Ergonomics는 ① <strong>디폴트 설정 선택</strong>(GC 종류, 힙 사이즈, GC 스레드 수, JIT 컴파일러)과 ② <strong>실행 중 동적 조정</strong>(목표 옵션에 따라 힙 사이즈·GC 파라미터 자동 조정)을 한다."}, {"q": "디폴트 힙 사이즈 공식(16GB RAM 기준)은?", "opts": ["Initial: 1GB, Max: 4GB", "Initial: RAM/64 = 250MB, Max: RAM/4 = 4GB", "Initial: RAM/4 = 4GB, Max: RAM = 16GB", "Initial: 512MB, Max: 8GB"], "ans": 1, "exp": "<strong>InitialHeapSize = RAM / 64</strong> (예: 16GB → 250MB), <strong>MaxHeapSize = RAM / 4</strong> (예: 16GB → 4GB)."}, {"q": "MaxGCPauseMillis 옵션의 역할은?", "opts": ["GC가 발생하는 최대 횟수 제한", "GC로 인한 STW 시간의 상한 목표", "힙 최대 크기 설정", "GC 스레드 수 제한"], "ans": 1, "exp": "<strong>-XX:MaxGCPauseMillis=N</strong>: GC로 인한 Stop-the-World 시간의 상한 목표. 디폴트는 no limit. 목표 초과 시 JVM이 힙 사이즈를 줄인다."}, {"q": "GCTimeRatio=99의 의미는?", "opts": ["GC가 전체 시간의 99%를 차지", "앱이 전체 시간의 99%(GC 1%)를 차지하도록 목표", "GC를 99번 수행", "힙이 99MB"], "ans": 1, "exp": "GC Time Ratio = 1/(1+N). GCTimeRatio=99 → 1/(1+99) = <strong>1% GC, 99% 어플리케이션</strong> 시간 목표. 스루풋 99% 목표."}, {"q": "Pause Time 목표 초과 시 Ergonomics의 대응은?", "opts": ["힙 크기를 늘린다", "힙 크기를 줄인다", "GC 스레드를 늘린다", "아무것도 하지 않는다"], "ans": 1, "exp": "<strong>힙을 줄인다</strong> → 검사할 객체 수 ↓ → GC 한 번 끝나는 시간 ↓ → Pause Time ↓. 반대로 Throughput 목표 미달 시에는 힙을 늘린다."}, {"q": "Throughput과 Pause Time 목표의 트레이드오프는?", "opts": ["둘 다 힙을 늘려야 달성", "Throughput 향상은 힙↑(GC 빈도↓), Pause Time 단축은 힙↓(1회 GC짧음)", "둘 다 GC 스레드를 늘려야 달성", "서로 트레이드오프 없음"], "ans": 1, "exp": "<strong>힙 크기와 정반대 방향</strong>으로 움직인다. Throughput → 힙 ↑ (GC 빈도 ↓, 1회 STW ↑). Pause Time → 힙 ↓ (GC 빈도 ↑, 1회 STW ↓)."}, {"q": "Minimum Footprint 목표가 작동하는 조건은?", "opts": ["힙이 꽉 찼을 때", "Throughput과 Pause Time 두 목표가 모두 충족되는 동안", "GC 횟수가 1000번을 넘었을 때", "JVM 시작 시 항상"], "ans": 1, "exp": "두 목표가 <strong>모두 충족</strong>되는 상황에서 JVM은 힙 사이즈를 조금씩 줄여 나간다. 줄이다 보면 Throughput Goal이 먼저 깨진다(힙 작아짐 → GC 빈번 → 누적 GC 시간↑)."}, {"q": "백엔드 서버에서 -Xms = -Xmx로 설정하는 이유가 아닌 것은?", "opts": ["서버 머신 메모리를 JVM이 데디케이트하여 사용", "운영 예측성 향상", "Ergonomics의 동적 조정을 최대 활용하기 위해", "확장/축소 비용 제거"], "ans": 2, "exp": "오히려 <strong>-Xms = -Xmx는 Ergonomics의 동적 조정을 무력화</strong>한다. 백엔드 서버는 힙을 고정시켜 조정 비용을 없애고, 예측 가능한 성능을 얻기 위해 이렇게 설정한다."}, {"q": "GCTimeRatio를 설정하는 올바른 방법은?", "opts": ["GC 비율 = GCTimeRatio / 100", "GC 비율 = 1 / (1 + GCTimeRatio)", "GC 비율 = GCTimeRatio", "GC 비율 = (1 + GCTimeRatio) / 100"], "ans": 1, "exp": "<strong>GC 비율 = 1 / (1 + N)</strong>. GCTimeRatio=19 → 1/20 = 5% GC, 95% 앱 실행. GCTimeRatio=9 → 1/10 = 10% GC."}, {"q": "GC가 하는 일 중 'OS에 반납'이 중요한 이유는?", "opts": ["반납하면 힙이 초기화됨", "JVM이 점유한 RAM을 다른 프로세스가 사용할 수 있게", "반납하면 GC가 빨라짐", "OS 명령이라 반드시 해야 함"], "ans": 1, "exp": "JVM이 점유한 메모리는 RAM에서 차지한다. 안 쓰는 영역을 계속 들고 있으면 <strong>같은 머신의 다른 프로세스가 못 쓰게 되는 민폐</strong>. uncommit하면 OS가 다른 프로세스에 재할당 가능."}, {"q": "Serial GC가 적합한 환경은?", "opts": ["32코어 서버", "4GB 힙 대용량 배치", "힙 100MB 이하 소규모 어플리케이션 or 싱글 코어", "초고트래픽 웹서버"], "ans": 2, "exp": "<strong>싱글 코어 환경</strong>(라즈베리파이 등)이나 <strong>힙 100MB 이하</strong> 소규모 환경. 힙이 작으면 병렬 동기화 오버헤드가 병렬화 이득을 잡아먹어 Serial이 오히려 유리."}, {"q": "ZGC의 핵심 특징은?", "opts": ["싱글 스레드로 안정적 수행", "힙 크기와 무관하게 1ms 미만 STW 보장", "최고 스루풋", "Generational 방식을 사용하지 않음"], "ans": 1, "exp": "<strong>힙이 수백MB든 16TB든 STW는 항상 1ms 미만</strong>. 거의 100% Concurrent 동작. 단, 스루풋은 살짝 손해. 금융·게임 등 초저지연 서비스에 적합."}, {"q": "GC 오버헤드의 두 가지 의미는?", "opts": ["메모리 낭비 + CPU 낭비", "C++ vs Java 비교 시 GC가 메모리 관리에 추가하는 비용 / Serial vs Parallel 비교 시 병렬 동기화 비용", "힙 크기 + 스레드 수", "STW 시간 + GC 횟수"], "ans": 1, "exp": "① C/C++ vs Java: GC가 메모리 관리를 위해 추가로 소비하는 모든 비용(검사·수거). ② Serial vs Parallel GC: 병렬 GC가 단일 스레드 GC 대비 추가로 발생시키는 비용(동기화 등)."}, {"q": "GC 튜닝 실전 순서로 올바른 것은?", "opts": ["Pause Time → Throughput → 하드웨어 증설", "GCTimeRatio로 스루풋 목표 → -Xmx 조정 → MaxGCPauseMillis 조정", "MaxGCPauseMillis → GCTimeRatio → -Xms", "힙 최대화 → GC 비활성화 → 모니터링"], "ans": 1, "exp": "① GCTimeRatio로 스루풋 목표 설정 → 미달 시 ② -Xmx를 RAM에 가깝게 올림 → 여전히 미달이면 ③ 하드웨어 부족(스케일업). Throughput 달성 후 ④ MaxGCPauseMillis로 Pause Time 조정."}];
+
+let qIdx=0,score=0,answered=false;
+function goTo(id){
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  const qs=document.getElementById('quiz-section');
+  if(id==='quiz'){
+    document.querySelectorAll('.section').forEach(s=>s.style.display='none');
+    qs.style.display='block'; quizStart();
+  } else {
+    qs.style.display='none';
+    document.querySelectorAll('.section').forEach(s=>s.style.display='');
+    const t=document.getElementById(id); if(t)t.classList.add('active');
+  }
+  document.querySelectorAll('.nav-item').forEach(n=>{
+    if((id==='quiz'&&n.textContent.includes('퀴즈'))||n.getAttribute('onclick')?.includes(id))n.classList.add('active');
+  });
+}
+function quizStart(){qIdx=0;score=0;answered=false;document.getElementById('quizMain').style.display='block';document.getElementById('quizResult').classList.remove('show');renderQ();}
+function renderQ(){
+  answered=false;
+  const q=questions[qIdx];
+  document.getElementById('qCount').textContent=`${qIdx+1} / ${questions.length}`;
+  document.getElementById('qProgressFill').style.width=`${(qIdx/questions.length)*100}%`;
+  document.getElementById('qText').textContent=q.q;
+  document.getElementById('qExplanation').className='quiz-explanation';
+  document.getElementById('qNextBtn').style.display='none';
+  const keys=['A','B','C','D'];
+  const c=document.getElementById('qOptions');c.innerHTML='';
+  q.opts.forEach((opt,i)=>{
+    const b=document.createElement('button');b.className='quiz-opt';
+    b.innerHTML=`<span class="opt-key">${keys[i]}</span>${opt}`;
+    b.onclick=()=>selectAnswer(i);c.appendChild(b);
+  });
+}
+function selectAnswer(i){
+  if(answered)return;answered=true;
+  const q=questions[qIdx];
+  const btns=document.querySelectorAll('.quiz-opt');
+  btns.forEach(b=>b.disabled=true);
+  if(i===q.ans){btns[i].classList.add('correct');score++;}
+  else{btns[i].classList.add('wrong');btns[q.ans].classList.add('correct');}
+  const exp=document.getElementById('qExplanation');exp.innerHTML=q.exp;exp.classList.add('show');
+  document.getElementById('qNextBtn').style.display='inline-block';
+  document.getElementById('qNextBtn').textContent=qIdx<questions.length-1?'다음 문제 →':'결과 보기 →';
+}
+function quizNext(){qIdx++;if(qIdx>=questions.length)showResult();else renderQ();}
+function showResult(){
+  document.getElementById('quizMain').style.display='none';
+  const pct=Math.round((score/questions.length)*100);
+  document.getElementById('quizScore').textContent=`${score} / ${questions.length}`;
+  let c='';
+  if(pct>=90)c='완벽합니다 🎉 다음 파트로!';
+  else if(pct>=70)c='잘 하셨어요 👍 틀린 챕터를 복습해보세요.';
+  else if(pct>=50)c='절반 통과 ✨ 핵심 챕터를 한 번 더 읽어보세요.';
+  else c='복습이 필요해요 📖 처음부터 다시 읽어보세요.';
+  document.getElementById('quizComment').textContent=`${pct}% 정답률 — ${c}`;
+  document.getElementById('quizResult').classList.add('show');
+}
+function quizRestart(){quizStart();}
+
+</script>
+</body>
+</html>

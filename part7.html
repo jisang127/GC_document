@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC 7부 — Parallel GC</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav id="sidebar">
+  <a class="nav-home" href="index.html">← 목차로</a>
+  <div class="logo"><div class="tag">GC 7부</div><h1 style="font-family:var(--display);font-size:22px;color:#fff;margin-top:4px;">Parallel GC</h1></div>
+  <nav>
+<div class="nav-item active" onclick="goTo('s0')"><span class="num">00</span> 개요</div>
+<div class="nav-item" onclick="goTo('s1')"><span class="num">01</span> 빠른 메타</div>
+<div class="nav-item" onclick="goTo('s2')"><span class="num">02</span> GC 스레드 다수 운영</div>
+<div class="nav-item" onclick="goTo('s3')"><span class="num">03</span> GC 스레드 수 공식</div>
+<div class="nav-item" onclick="goTo('s4')"><span class="num">04</span> 메모리 레이아웃이 뒤집힌 이유</div>
+<div class="nav-item" onclick="goTo('s5')"><span class="num">05</span> PLAB</div>
+<div class="nav-item" onclick="goTo('s6')"><span class="num">06</span> Ergonomics 행동 기반 튜닝</div>
+<div class="nav-item" onclick="goTo('s7')"><span class="num">07</span> 세 가지 목표</div>
+<div class="nav-item" onclick="goTo('s8')"><span class="num">08</span> Supplement 초반 부스터</div>
+<div class="nav-item" onclick="goTo('s9')"><span class="num">09</span> 초기 힙 사이즈</div>
+<div class="nav-item" onclick="goTo('s10')"><span class="num">10</span> Generation 고정 vs Adaptive</div>
+    <div class="nav-item" onclick="goTo('quiz')" style="margin-top:10px;border-top:1px solid var(--border);padding-top:14px;"><span class="num">🧪</span> 퀴즈 (20문제)</div>
+  </nav>
+</nav>
+<main id="main">
+<div class="section active" id="s0">
+  <div class="section-header"><div class="chip">GC 7부</div><h2>Parallel GC<br>(Throughput Collector)</h2><p>Serial GC 구조에 멀티코어 병렬성을 입혔다. 결정적 차이는 메모리 레이아웃 역전, PLAB, Ergonomics의 행동 기반 튜닝.</p></div>
+  <div class="info-box purple"><strong>면접 포인트:</strong> "Parallel GC도 어플리케이션 코드와 GC 스레드가 동시에 실행되는가?" → <strong>NO</strong>. Serial이든 Parallel이든 GC 타임에는 모든 코어를 GC 스레드가 점유한다. concurrent execution이 들어오는 건 G1 GC부터다.</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:16px;">
+    <div class="card" style="border-color:rgba(0,212,255,.3);"><h3>멀티스레드 GC</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">모든 코어에 GC 스레드 동시 실행. 앱은 여전히 STW.</p></div>
+    <div class="card" style="border-color:rgba(245,158,11,.3);"><h3>PLAB</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">GC 스레드 전용 할당 버퍼. TLAB의 GC 버전.</p></div>
+    <div class="card" style="border-color:rgba(16,185,129,.3);"><h3>Behavioral Tuning</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">목표만 설정하면 Ergonomics가 힙 크기를 자동 조정.</p></div>
+  </div>
+</div>
+<div class="section" id="s1">
+  <div class="section-header"><div class="chip">Chapter 01</div><h2>빠른 메타</h2></div>
+  <div class="card"><h3>Parallel GC 핵심 정보</h3>
+    <table class="data-table"><thead><tr><th>항목</th><th>값</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">호칭</td><td>Parallel GC / Throughput Collector / Throughput GC</td></tr>
+      <tr><td class="highlight">활성화 옵션</td><td class="code">-XX:+UseParallelGC</td></tr>
+      <tr><td class="highlight">Young 알고리즘</td><td>PSScavenge (parallel copying) — 로그: <span class="code">PSYoungGen</span></td></tr>
+      <tr><td class="highlight">Old 알고리즘 (현재)</td><td>PSParallelCompact (mark → summary → compact 3단계 병렬) — 로그: <span class="code">ParOldGen</span></td></tr>
+      <tr><td class="highlight">Old 알고리즘 (초창기)</td><td>PSMarkSweep (싱글 스레드) — 로그: <span class="code">PSOldGen</span></td></tr>
+      <tr><td class="highlight">Stop-the-world</td><td><strong style="color:var(--danger);">항상 발생</strong> (concurrent 없음)</td></tr>
+      <tr><td class="highlight">JDK 8까지</td><td>서버 클래스 머신 디폴트 GC</td></tr>
+      <tr><td class="highlight">현재 디폴트</td><td>G1 GC</td></tr>
+    </tbody></table></div>
+</div>
+<div class="section" id="s2">
+  <div class="section-header"><div class="chip">Chapter 02</div><h2>GC 스레드 다수 운영</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Serial vs Parallel 비교</h3>
+    <div class="code-block">Serial GC:   GC time → [ GC thread 1 ]  나머지 코어는 idle
+                               singleton
+
+Parallel GC: GC time → [ GC1 ][ GC2 ][ GC3 ][ GC4 ]
+                        모든 코어에 GC 스레드 동시 실행
+                        어플리케이션 스레드는 모두 정지 (STW)</div></div>
+  <div class="card"><h3>머신 스펙별 성능 특성</h3>
+    <table class="data-table"><thead><tr><th>머신</th><th>Parallel vs Serial</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">싱글 코어</td><td>오히려 Parallel이 손해. PLAB/work-stealing 등 동기화 코드 경로가 그대로 작동해 오버헤드만 추가</td></tr>
+      <tr><td class="highlight">듀얼 코어 + 중대형 힙</td><td>Parallel이 약간 우세</td></tr>
+      <tr><td class="highlight">멀티코어 (4+)</td><td><strong style="color:var(--accent3);">Parallel 명백히 우세</strong>, 코어 늘수록 격차 커짐</td></tr>
+    </tbody></table></div>
+</div>
+<div class="section" id="s3">
+  <div class="section-header"><div class="chip">Chapter 03</div><h2>GC 스레드 수 공식</h2><p>Ergonomics 디폴트 — n = 가용 CPU 수.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>공식</h3>
+    <div class="code-block">n ≤ 8  →  GC 스레드 수 = n
+n > 8  →  GC 스레드 수 = 8 + (n - 8) × 5/8  (소수점 버림)</div></div>
+  <div class="card" style="margin-bottom:16px;"><h3>예시 계산</h3>
+    <table class="data-table"><thead><tr><th>n (코어/HW스레드)</th><th>GC 스레드 수</th><th>계산</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td class="highlight">1</td><td>—</td></tr>
+      <tr><td>4</td><td class="highlight">4</td><td>—</td></tr>
+      <tr><td>8</td><td class="highlight">8</td><td>—</td></tr>
+      <tr><td>12</td><td class="highlight">10</td><td>8 + (4 × 5/8) = 8 + 2</td></tr>
+      <tr><td>16</td><td class="highlight">13</td><td>8 + (8 × 5/8) = 8 + 5</td></tr>
+      <tr><td>32</td><td class="highlight">23</td><td>8 + (24 × 5/8) = 8 + 15</td></tr>
+    </tbody></table></div>
+  <div class="info-box">왜 5/8로 떨어뜨리나? → <strong>스레드 간 동기화 오버헤드</strong>가 늘기 때문. 코어 수만큼 무한정 늘리면 오히려 손해. <span class="tag-inline">-XX:ParallelGCThreads=N</span>으로 직접 명시 가능.</div>
+</div>
+<div class="section" id="s4">
+  <div class="section-header"><div class="chip">Chapter 04</div><h2>메모리 레이아웃이<br>뒤집힌 이유</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Serial vs Parallel 레이아웃</h3>
+    <div class="code-block">가상 주소 공간          낮은 주소 ────────────► 높은 주소
+
+Serial GC:   [ Young (Eden+S0+S1) ][ Old ]
+
+Parallel GC: [ Old ][ Young ]
+              └ 시작 시점에 boundary 고정 (PIN) ┘</div></div>
+  <div class="card" style="margin-bottom:16px;"><h3>왜 뒤집혔나? — UseAdaptiveGCBoundary</h3>
+    <div style="display:flex;flex-direction:column;gap:7px;margin-bottom:12px;">
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><strong>문제:</strong> Serial 레이아웃[Young|Old]으로는 boundary를 못 옮김 — Old 객체들이 바로 옆 경계에 붙어있어서</div>
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><strong>조건:</strong> Serial의 '왼쪽부터 차곡차곡 콤팩트' 알고리즘을 재사용해야 함</div>
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><strong>해결:</strong> [Old(왼쪽부터 채움)][↔경계이동↔][Young] → Old는 Serial 알고리즘 그대로 재사용 가능</div>
+    </div>
+    <div class="info-box yellow" style="margin-bottom:0;">UseAdaptiveGCBoundary는 JDK 16에서 expired (에러). 하지만 <strong>레이아웃은 그대로 남았다.</strong> JDK 25: "The generation boundary is fixed at startup."</div></div>
+</div>
+<div class="section" id="s5">
+  <div class="section-header"><div class="chip">Chapter 05</div><h2>PLAB</h2><p>Promotion Local Allocation Buffer — GC 스레드 전용 할당 버퍼.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>TLAB vs PLAB 비교</h3>
+    <table class="data-table"><thead><tr><th>항목</th><th>TLAB</th><th>PLAB</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">풀네임</td><td>Thread Local Allocation Buffer</td><td>Promotion Local Allocation Buffer</td></tr>
+      <tr><td class="highlight">누구에게 할당</td><td>어플리케이션 스레드</td><td>GC 스레드</td></tr>
+      <tr><td class="highlight">위치</td><td>Eden 안</td><td>Survivor(To) + Old Generation</td></tr>
+      <tr><td class="highlight">목적</td><td>객체 할당 시 스레드 간 동기화 회피</td><td>Survivor 복사/Old promotion 시 GC 스레드 간 동기화 회피</td></tr>
+    </tbody></table></div>
+  <div class="card"><h3>기본 PLAB 크기 (64비트)</h3>
+    <div class="code-block">YoungPLABSize = 4096 words = 32 KB
+OldPLABSize   = 1024 words =  8 KB  (Old에선 PLAB가 더 작음)</div></div>
+</div>
+<div class="section" id="s6">
+  <div class="section-header"><div class="chip">Chapter 06</div><h2>Ergonomics<br>행동 기반 튜닝</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Serial vs Parallel Ergonomics 차이</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div style="border:1px solid var(--border);border-radius:6px;padding:14px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-bottom:6px;">Serial GC</div>
+        <p style="font-size:12px;color:var(--text-dim);">low-level 옵션으로 한 땀 한 땀 튜닝. (-Xmn, NewRatio, SurvivorRatio 등)</p>
+      </div>
+      <div style="border:1px solid rgba(0,212,255,.3);border-radius:6px;padding:14px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent);margin-bottom:6px;">Parallel GC</div>
+        <p style="font-size:12px;color:var(--text-dim);">"내가 원하는 목표"만 정해주면 ergonomics가 generation size 등 파라미터를 자동 조정.</p>
+      </div>
+    </div></div>
+</div>
+<div class="section" id="s7">
+  <div class="section-header"><div class="chip">Chapter 07</div><h2>세 가지 목표<br>(우선순위 순)</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>목표 옵션</h3>
+    <table class="data-table"><thead><tr><th>우선순위</th><th>목표</th><th>VM 옵션</th><th>디폴트</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">1순위</td><td>Max GC Pause</td><td class="code">-XX:MaxGCPauseMillis=N</td><td><strong style="color:var(--danger);">no limit</strong></td></tr>
+      <tr><td class="highlight">2순위</td><td>Throughput</td><td class="code">-XX:GCTimeRatio=N</td><td>99 → GC 1% 목표</td></tr>
+      <tr><td class="highlight">3순위</td><td>Footprint</td><td>(직접 옵션 없음)</td><td>위 둘 충족 시 자동 축소</td></tr>
+    </tbody></table>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">MaxGCPauseMillis 디폴트가 no limit이라서 사실상 <strong>Throughput Collector</strong>가 되는 것.</div></div>
+  <div class="card"><h3>목표 간 트레이드오프</h3>
+    <table class="data-table"><thead><tr><th>상황</th><th>힙</th><th>결과</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">Pause 목표 미달</td><td>↓ 축소 (5%씩)</td><td>1회 GC 짧아짐. Throughput은 떨어질 수 있음</td></tr>
+      <tr><td class="highlight">Throughput 목표 미달</td><td>↑ 확장 (20%씩, Young/Old 동시)</td><td>GC 빈도 감소. 1회 STW는 길어질 수 있음</td></tr>
+    </tbody></table>
+    <div class="info-box yellow" style="margin-top:12px;margin-bottom:0;">⚠️ Max Pause를 너무 빡빡하게 잡으면 힙이 계속 줄어 GC 너무 자주 발생 → 누적 GC 타임이 오히려 늘어남. "STW 짧게 = 무조건 좋다"가 아님.</div></div>
+</div>
+<div class="section" id="s8">
+  <div class="section-header"><div class="chip">Chapter 08</div><h2>Supplement<br>초반 부스터</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>동작 원리</h3>
+    <div class="code-block">초기: 증가율 = Increment(20%) + Supplement(80%) = 100%
+시간 지남: Supplement는 n번 GC마다 절반씩 감쇠 (>> 1, 비트 시프트)
+결국: Supplement → 0, Increment(20%)만 남음</div>
+    <div class="info-box purple" style="margin-top:12px;margin-bottom:0;">소스 코드 실제 동작:<br><code>if ((collection_count % decay) == 0) supplement = supplement >> 1;</code><br>→ n번 컬렉션마다 supplement를 절반으로. "supplement에서 8을 뺀다" / "8로 나눈다" 등은 틀린 설명.</div></div>
+  <div class="card"><h3>Young GC 횟수별 총 증가율</h3>
+    <table class="data-table"><thead><tr><th>Young GC 횟수</th><th>Supplement</th><th>총 증가율</th></tr></thead>
+    <tbody>
+      <tr><td>0~7</td><td>80%</td><td class="highlight">100%</td></tr>
+      <tr><td>8~15</td><td>40%</td><td class="highlight">60%</td></tr>
+      <tr><td>16~23</td><td>20%</td><td class="highlight">40%</td></tr>
+      <tr><td>24~31</td><td>10%</td><td class="highlight">30%</td></tr>
+      <tr><td>결국</td><td>0</td><td class="highlight">20% (Increment만)</td></tr>
+    </tbody></table></div>
+</div>
+<div class="section" id="s9">
+  <div class="section-header"><div class="chip">Chapter 09</div><h2>초기 힙 사이즈 디폴트</h2></div>
+  <div class="card"><h3>Parallel GC 초기 힙 사이즈</h3>
+    <div class="code-block">InitialHeapSize = 머신 메모리 / 64
+MaxHeapSize     = 머신 메모리 / 4
+MaxYoungGen     = MaxHeapSize × 1/3</div>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">Max Pause + Throughput <strong>둘 다 충족하는 동안엔 힙이 조금씩 감소</strong> → 안 쓰는 메모리는 OS에 uncommit → 같은 머신의 다른 프로세스 가용.</div></div>
+</div>
+<div class="section" id="s10">
+  <div class="section-header"><div class="chip">Chapter 10</div><h2>Generation 사이즈<br>고정 vs Adaptive</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>사이즈를 고정시키는 조합</h3>
+    <table class="data-table"><thead><tr><th>조합</th><th>결과</th></tr></thead>
+    <tbody>
+      <tr><td class="code">-Xms == -Xmx</td><td>전체 힙 고정. Young/Old 비율은 ergonomics가 조정 가능</td></tr>
+      <tr><td class="code">-XX:NewSize == -XX:MaxNewSize</td><td>Young 고정. Old만 ergonomics가 조정</td></tr>
+      <tr><td class="code">-Xms == -Xmx 그리고 NewSize == MaxNewSize</td><td class="highlight">Young/Old 모두 고정 → adaptive 사실상 무력화</td></tr>
+      <tr><td class="code">-Xmn N</td><td>NewSize == MaxNewSize == N과 동일</td></tr>
+    </tbody></table></div>
+  <div class="info-box yellow">⚠️ <strong>배치 워크로드의 역설</strong>: Parallel GC를 선택한 이유 = behavioral tuning 위임. 그런데 Xms=Xmx로 고정하면 adaptive 핵심 기능 무력화. Parallel을 선택한 의미가 사라짐. 배치 워크로드에서는 <strong>Xms &lt; Xmx로 두는 게 오히려 맞을 수 있다</strong>. 서버 어플리케이션과는 다른 의사결정 라인.</div>
+</div>
+<div id="quiz-section" style="display:none;">
+  <div class="section-header"><div class="chip">퀴즈</div><h2>실력 확인 — 20문제</h2><p>7부 핵심 개념 점검.</p></div>
+  <div id="quizMain">
+    <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="qProgressFill" style="width:0%"></div></div>
+    <div class="quiz-q-count" id="qCount">1 / 20</div>
+    <div class="quiz-question" id="qText"></div>
+    <div class="quiz-options" id="qOptions"></div>
+    <div class="quiz-explanation" id="qExplanation"></div>
+    <button class="btn btn-primary" id="qNextBtn" style="display:none;" onclick="quizNext()">다음 문제 →</button>
+  </div>
+  <div class="quiz-result" id="quizResult">
+    <div class="score-num" id="quizScore"></div>
+    <p id="quizComment"></p>
+    <button class="btn btn-ghost" style="margin-top:24px;" onclick="quizRestart()">다시 풀기</button>
+  </div>
+</div>
+</main>
+<script>
+const questions = [{"q": "Parallel GC가 'Throughput Collector'로 불리는 이유는?", "opts": ["GC 스레드가 많아서", "MaxGCPauseMillis 디폴트가 no limit이라 사실상 Throughput 최적화에만 집중하기 때문", "Concurrent GC라서", "메모리를 절약하기 때문"], "ans": 1, "exp": "<strong>MaxGCPauseMillis 디폴트 = no limit</strong>. Pause Time 목표가 없으니 사실상 Throughput(GCTimeRatio=99, 즉 GC 1% 목표)만 추구하는 Throughput Collector가 된다."}, {"q": "Parallel GC도 어플리케이션과 GC가 concurrent 실행되나?", "opts": ["예, 멀티스레드라서 가능", "아니다. 전 영역 STW. 어플리케이션-GC concurrent는 CMS/G1부터", "부분적으로 가능", "힙 크기에 따라 다름"], "ans": 1, "exp": "<strong>아니다. Parallel GC도 전 영역 STW</strong>. GC 스레드끼리만 병렬. 어플리케이션과 GC가 concurrent 실행되는 것은 CMS/G1부터 등장한다. 이게 결정적인 분기점."}, {"q": "GC 스레드 수 공식에서 CPU 코어 수 n=12일 때 GC 스레드 수는?", "opts": ["12", "8", "10", "13"], "ans": 2, "exp": "n > 8이면: 8 + (n-8) × 5/8 (소수점 버림). n=12: <strong>8 + (12-8) × 5/8 = 8 + 4×5/8 = 8 + 2 = 10</strong>."}, {"q": "GC 스레드 수 공식이 n>8일 때 비율을 5/8로 떨어뜨리는 이유는?", "opts": ["JVM 버그", "스레드 간 동기화 오버헤드가 늘기 때문 — 코어 수만큼 늘리면 오히려 손해", "법적 제한", "메모리 부족"], "ans": 1, "exp": "코어 수가 많아질수록 <strong>스레드 간 동기화 오버헤드</strong>가 증가. 코어 수만큼 무한정 GC 스레드를 늘리면 오히려 성능이 손해. 5/8로 점진적으로 늘려 최적점을 찾는다."}, {"q": "Serial GC와 Parallel GC의 메모리 레이아웃 차이는?", "opts": ["Serial: [Old][Young], Parallel: [Young][Old]", "Serial: [Young][Old], Parallel: [Old][Young]", "둘 다 [Young][Old]", "둘 다 [Old][Young]"], "ans": 1, "exp": "<strong>Serial: [Young][Old]</strong> (낮은 주소에 Young). <strong>Parallel: [Old][Young]</strong> (낮은 주소에 Old). UseAdaptiveGCBoundary와 Serial의 콤팩트 알고리즘 재사용 때문에 레이아웃이 뒤집혔다."}, {"q": "Parallel GC 레이아웃이 [Old][Young]으로 뒤집힌 핵심 이유는?", "opts": ["성능 최적화를 위해", "deprecated UseAdaptiveGCBoundary 지원 + Serial의 '왼쪽부터 콤팩트' 알고리즘 재사용을 위해", "JVM 설계 실수", "OS 요구사항"], "ans": 1, "exp": "Old를 왼쪽에 두면 ① <strong>UseAdaptiveGCBoundary 지원</strong> (경계 이동) 가능 ② <strong>Serial의 '왼쪽부터 차곡차곡 콤팩트' 알고리즘을 Old에 그대로 재사용</strong> 가능. 옵션은 JDK 16 expired됐지만 레이아웃은 남았다."}, {"q": "JDK 25에서 Parallel GC의 generation boundary는?", "opts": ["GC마다 동적으로 변경", "JVM 시작 시점에 고정되어 절대 움직이지 않음", "매 Full GC마다 조정", "Ergonomics가 분마다 조정"], "ans": 1, "exp": "OpenJDK 25 소스 코드: <strong>'The generation boundary is fixed at startup.'</strong> JVM 시작 시점에 boundary 결정되고 절대 안 움직임. AI가 '경계가 왔다갔다 한다'고 잘못 설명하는 경우가 많음."}, {"q": "PLAB(Promotion Local Allocation Buffer)와 TLAB의 차이는?", "opts": ["PLAB는 앱 스레드용, TLAB는 GC 스레드용", "TLAB는 앱 스레드용(Eden), PLAB는 GC 스레드용(Survivor+Old)", "둘 다 Eden에 위치", "둘 다 GC 스레드용"], "ans": 1, "exp": "<strong>TLAB</strong>: 앱 스레드에 할당 → Eden. <strong>PLAB</strong>: GC 스레드에 할당 → Survivor To + Old Generation. Survivor 복사/Old promotion 시 GC 스레드 간 동기화 회피 목적."}, {"q": "Young PLAB와 Old PLAB의 기본 크기(64비트)는?", "opts": ["둘 다 32KB", "YoungPLABSize=32KB(4096 words), OldPLABSize=8KB(1024 words)", "YoungPLABSize=8KB, OldPLABSize=32KB", "둘 다 8KB"], "ans": 1, "exp": "<strong>YoungPLABSize = 4096 words = 32KB</strong>, <strong>OldPLABSize = 1024 words = 8KB</strong>. Old에서 PLAB가 더 작다."}, {"q": "Ergonomics의 세 가지 목표 우선순위 순서는?", "opts": ["Throughput > Max Pause > Footprint", "Max Pause > Throughput > Footprint", "Footprint > Max Pause > Throughput", "Max Pause > Footprint > Throughput"], "ans": 1, "exp": "<strong>1순위: Max GC Pause (MaxGCPauseMillis)</strong> → 2순위: Throughput (GCTimeRatio) → 3순위: Footprint (직접 옵션 없음, 위 둘 충족 시 자동 축소)."}, {"q": "Ergonomics의 확장률(20%)과 축소율(5%)이 비대칭인 이유는?", "opts": ["버그", "Throughput collector의 본성 — 늘릴 때 공격적, 줄일 때 신중", "OS 정책", "GC 스레드 수 때문"], "ans": 1, "exp": "<strong>Throughput collector의 본성</strong>. 줄일 땐 천천히(5% = 20% ÷ 4 = YoungGenerationSizeIncrement / AdaptiveSizeDecrementScaleFactor), 늘릴 땐 시원하게(20%)."}, {"q": "Supplement 초반 부스터가 작동하는 방식은?", "opts": ["GC 횟수마다 20%씩 증가", "JVM 시작 직후 초기 증가율 = Increment(20%) + Supplement(80%) = 100%, 이후 n번 GC마다 절반씩 감쇠", "매 GC마다 고정 80% 추가", "Supplement는 축소에만 영향"], "ans": 1, "exp": "<strong>초기: 증가율 = 20% + 80% = 100%</strong>. 이후 n번 컬렉션마다 supplement를 절반으로(bit shift >> 1). 결국 Increment(20%)만 남음. Supplement는 확장에만 영향, 축소에는 없음."}, {"q": "Supplement Decay의 실제 동작(소스 코드 기준)은?", "opts": ["supplement에서 decay 값을 빼기", "supplement를 decay로 나누기", "n번 컬렉션마다 supplement를 비트 시프트(>> 1) = 절반으로", "n번마다 20% 감소"], "ans": 2, "exp": "소스 코드: <code>if((collection_count % decay) == 0) supplement = supplement >> 1;</code> <strong>비트 시프트 = ÷ 2</strong>. 'supplement에서 8을 뺀다' / 'supplement를 8로 나눈다' 등은 모두 틀린 설명."}, {"q": "Parallel GC의 초기 힙 사이즈 디폴트는?", "opts": ["InitialHeapSize = 머신 메모리 / 4", "InitialHeapSize = 머신 메모리 / 64, MaxHeapSize = 머신 메모리 / 4", "InitialHeapSize = 1GB, MaxHeapSize = 4GB", "모두 Ergonomics가 결정"], "ans": 1, "exp": "<strong>InitialHeapSize = 머신 메모리 / 64, MaxHeapSize = 머신 메모리 / 4, MaxYoungGen = MaxHeapSize × 1/3</strong>. Max Pause + Throughput 둘 다 충족 시 힙이 조금씩 감소 → OS에 uncommit."}, {"q": "-Xms = -Xmx 설정이 Parallel GC의 Behavioral Tuning에 미치는 영향은?", "opts": ["Ergonomics가 더 잘 동작함", "Adaptive sizing의 핵심 기능이 사실상 무력화됨 — Parallel 선택 의미가 사라짐", "Young/Old 비율만 고정됨", "PLAB 크기만 고정됨"], "ans": 1, "exp": "Parallel GC를 배치 워크로드에 선택한 이유 = behavioral tuning을 ergonomics에 맡기기 위함. 그런데 Xms=Xmx로 고정하면 <strong>adaptive 핵심 기능 무력화</strong> → Parallel을 선택한 의미가 사라짐. 배치 워크로드에선 Xms &lt; Xmx가 오히려 맞을 수 있다."}, {"q": "Parallel GC의 Young GC 알고리즘과 로그 prefix는?", "opts": ["PSMarkSweep / PSOldGen", "PSScavenge (parallel copying) / PSYoungGen", "PSParallelCompact / ParOldGen", "DefNew / Young"], "ans": 1, "exp": "Young GC: <strong>PSScavenge (parallel copying)</strong> — root부터 따라가며 To-Survivor/Old로 복사. 로그: <strong>PSYoungGen</strong>."}, {"q": "Parallel GC의 Full GC 알고리즘과 로그 prefix는?", "opts": ["PSScavenge / PSYoungGen", "PSParallelCompact (mark→summary→compact 3단계 병렬) / ParOldGen", "Mark-Copy / OldGen", "DefNew / Tenured"], "ans": 1, "exp": "Full GC: <strong>PSParallelCompact</strong> (mark → summary → compact 3단계 병렬). 로그: <strong>ParOldGen</strong>. 초기 Parallel GC Old 알고리즘은 PSMarkSweep(싱글 스레드, PSOldGen)이었다."}, {"q": "GCTimeRatio=9의 의미는?", "opts": ["GC가 전체 시간의 9%", "GC time : app time = 1 : 9 → GC 10% 목표", "GC가 9초마다 실행", "Throughput 90% 목표, GC 10% 허용"], "ans": 3, "exp": "GC Time Ratio = 1/(1+N). GCTimeRatio=9 → 1/(1+9) = <strong>10% GC 시간 허용 (목표가 헐거워짐)</strong>. GCTimeRatio=99 → 1% GC, 99% 앱. 숫자가 클수록 GC 비중이 작은 것이 목표."}, {"q": "싱글 코어 머신에서 Parallel GC를 쓰면?", "opts": ["Serial보다 빠름", "오히려 Parallel이 손해 — PLAB/work-stealing 등 다중스레드 동기화 코드가 그대로 작동해 오버헤드만 추가", "성능 동일", "GC가 비활성화됨"], "ans": 1, "exp": "<strong>싱글 코어에서는 Parallel이 오히려 손해</strong>. GC 스레드가 1개여도 PLAB, work-stealing 등 다중스레드 동기화 코드 경로가 그대로 작동해 오버헤드만 추가된다."}, {"q": "-XX:ParallelGCThreads=N 옵션이 의미 있는 경우는?", "opts": ["항상 명시해야 함", "한 머신에 여러 JVM을 띄울 때 — GC 스레드 수를 제한해 다른 JVM과 CPU를 나눌 수 있음", "힙 크기가 4GB 이상일 때만", "Java 버전에 상관없이"], "ans": 1, "exp": "Default는 0 = Ergonomics에 위임. <strong>한 머신에 여러 JVM을 띄울 때</strong> 각 JVM의 GC 스레드 수를 명시적으로 제한해 CPU를 나눠 쓰는 것이 의미 있다."}];
+
+let qIdx=0,score=0,answered=false;
+function goTo(id){
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  const qs=document.getElementById('quiz-section');
+  if(id==='quiz'){
+    document.querySelectorAll('.section').forEach(s=>s.style.display='none');
+    qs.style.display='block'; quizStart();
+  } else {
+    qs.style.display='none';
+    document.querySelectorAll('.section').forEach(s=>s.style.display='');
+    const t=document.getElementById(id); if(t)t.classList.add('active');
+  }
+  document.querySelectorAll('.nav-item').forEach(n=>{
+    if((id==='quiz'&&n.textContent.includes('퀴즈'))||n.getAttribute('onclick')?.includes(id))n.classList.add('active');
+  });
+}
+function quizStart(){qIdx=0;score=0;answered=false;document.getElementById('quizMain').style.display='block';document.getElementById('quizResult').classList.remove('show');renderQ();}
+function renderQ(){
+  answered=false;
+  const q=questions[qIdx];
+  document.getElementById('qCount').textContent=`${qIdx+1} / ${questions.length}`;
+  document.getElementById('qProgressFill').style.width=`${(qIdx/questions.length)*100}%`;
+  document.getElementById('qText').textContent=q.q;
+  document.getElementById('qExplanation').className='quiz-explanation';
+  document.getElementById('qNextBtn').style.display='none';
+  const keys=['A','B','C','D'];
+  const c=document.getElementById('qOptions');c.innerHTML='';
+  q.opts.forEach((opt,i)=>{
+    const b=document.createElement('button');b.className='quiz-opt';
+    b.innerHTML=`<span class="opt-key">${keys[i]}</span>${opt}`;
+    b.onclick=()=>selectAnswer(i);c.appendChild(b);
+  });
+}
+function selectAnswer(i){
+  if(answered)return;answered=true;
+  const q=questions[qIdx];
+  const btns=document.querySelectorAll('.quiz-opt');
+  btns.forEach(b=>b.disabled=true);
+  if(i===q.ans){btns[i].classList.add('correct');score++;}
+  else{btns[i].classList.add('wrong');btns[q.ans].classList.add('correct');}
+  const exp=document.getElementById('qExplanation');exp.innerHTML=q.exp;exp.classList.add('show');
+  document.getElementById('qNextBtn').style.display='inline-block';
+  document.getElementById('qNextBtn').textContent=qIdx<questions.length-1?'다음 문제 →':'결과 보기 →';
+}
+function quizNext(){qIdx++;if(qIdx>=questions.length)showResult();else renderQ();}
+function showResult(){
+  document.getElementById('quizMain').style.display='none';
+  const pct=Math.round((score/questions.length)*100);
+  document.getElementById('quizScore').textContent=`${score} / ${questions.length}`;
+  let c='';
+  if(pct>=90)c='완벽합니다 🎉 다음 파트로!';
+  else if(pct>=70)c='잘 하셨어요 👍 틀린 챕터를 복습해보세요.';
+  else if(pct>=50)c='절반 통과 ✨ 핵심 챕터를 한 번 더 읽어보세요.';
+  else c='복습이 필요해요 📖 처음부터 다시 읽어보세요.';
+  document.getElementById('quizComment').textContent=`${pct}% 정답률 — ${c}`;
+  document.getElementById('quizResult').classList.add('show');
+}
+function quizRestart(){quizStart();}
+
+</script>
+</body>
+</html>

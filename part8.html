@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC 8부 — G1GC 핵심 원리</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav id="sidebar">
+  <a class="nav-home" href="index.html">← 목차로</a>
+  <div class="logo"><div class="tag">GC 8부</div><h1 style="font-family:var(--display);font-size:20px;color:#fff;margin-top:4px;line-height:1.2;">G1GC 핵심 원리</h1></div>
+  <nav>
+<div class="nav-item active" onclick="goTo('s0')"><span class="num">00</span> 개요</div>
+<div class="nav-item" onclick="goTo('s1')"><span class="num">01</span> Serial/Parallel GC 약점</div>
+<div class="nav-item" onclick="goTo('s2')"><span class="num">02</span> Region — 새 패러다임</div>
+<div class="nav-item" onclick="goTo('s3')"><span class="num">03</span> Old GC가 느린 이유</div>
+<div class="nav-item" onclick="goTo('s4')"><span class="num">04</span> G1GC의 3대 아이디어</div>
+<div class="nav-item" onclick="goTo('s5')"><span class="num">05</span> 동작 페이즈 큰 그림</div>
+<div class="nav-item" onclick="goTo('s6')"><span class="num">06</span> Mixed Collection</div>
+<div class="nav-item" onclick="goTo('s7')"><span class="num">07</span> Concurrent Marking 3단계</div>
+<div class="nav-item" onclick="goTo('s8')"><span class="num">08</span> Floating Garbage</div>
+<div class="nav-item" onclick="goTo('s9')"><span class="num">09</span> Full GC</div>
+<div class="nav-item" onclick="goTo('s10')"><span class="num">10</span> 면접 포인트</div>
+    <div class="nav-item" onclick="goTo('quiz')" style="margin-top:10px;border-top:1px solid var(--border);padding-top:14px;"><span class="num">🧪</span> 퀴즈 (20문제)</div>
+  </nav>
+</nav>
+<main id="main">
+<div class="section active" id="s0">
+  <div class="section-header"><div class="chip">GC 8부</div><h2>G1GC는 어떻게<br>동작하는가?</h2><p>Region 도입 + Garbage First 전략 + Concurrent Marking 세 축으로 Serial/Parallel GC의 두 약점을 풀었다.</p></div>
+  <div class="info-box purple"><strong>핵심:</strong> "Old를 다 차기 전에 가비지 많은 일부 Region만 골라서 Young GC에 숟가락 얹어 처리한다" — 이것이 <strong>Mixed Collection</strong>이고 G1GC의 정체성이다.</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:16px;">
+    <div class="card" style="border-color:rgba(0,212,255,.3);"><h3>Region</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">힙을 균등 분할. 역할이 동적으로 변함. Young/Old 경계 고정 문제 해결</p></div>
+    <div class="card" style="border-color:rgba(16,185,129,.3);"><h3>Garbage First</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">가비지 많은 Old Region만 선택해 일부씩 컬렉션. Mixed Collection의 핵심</p></div>
+    <div class="card" style="border-color:rgba(124,58,237,.3);"><h3>Concurrent Marking</h3><p style="font-size:12px;color:var(--text-dim);line-height:1.6;">Old 마킹을 앱과 동시에. STW 문제 해결. CMS의 장점 계승</p></div>
+  </div>
+</div>
+<div class="section" id="s1">
+  <div class="section-header"><div class="chip">Chapter 01</div><h2>Serial/Parallel GC<br>두 약점</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>두 가지 약점</h3>
+    <table class="data-table"><thead><tr><th>약점</th><th>문제</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">① 모든 GC가 STW</td><td>멀티코어를 못 살림. CPU 코어 4·8개여도 GC 동안 모든 어플 스레드 정지</td></tr>
+      <tr><td class="highlight">② Young/Old 경계 고정</td><td>프로세스 시작 시 결정. UseAdaptiveGCBoundary는 폐기됨. 트래픽 패턴이 바뀌어도 적응 불가</td></tr>
+    </tbody></table></div>
+  <div class="card"><h3>G1GC 해결책 두괄식</h3>
+    <div class="info-box green" style="margin-bottom:0;">Old를 컬렉션할 때 <strong>Concurrent하게 동작</strong> + <strong>Region 개념 도입</strong>으로 두 약점을 동시에 해결.</div></div>
+</div>
+<div class="section" id="s2">
+  <div class="section-header"><div class="chip">Chapter 02</div><h2>Region<br>— G1GC의 새 패러다임</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Region 핵심 정의</h3>
+    <div class="info-box purple" style="margin-bottom:14px;"><strong>Region = JVM 힙을 균등한 크기로 쪼갠 작은 단위.</strong> 각 Region이 동적으로 Eden/Survivor/Old/Humongous 역할을 부여받는다.</div>
+    <div class="code-block">┌──┬──┬──┬──┐
+│E │S │O │F │  ← 2차원으로 보여도 실제는 1차원
+├──┼──┼──┼──┤
+│E │O │S │H │
+└──┴──┴──┴──┘
+(E=Eden, S=Survivor, O=Old, F=Free, H=Humongous)</div></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Region 크기 결정</h3>
+    <table class="data-table"><thead><tr><th>규칙</th><th>내용</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">목표</td><td>-Xmx를 디폴트 2048개 Region으로 나눈 크기</td></tr>
+      <tr><td class="highlight">제약</td><td>1·2·4·8·16·32MB 중 2의 거듭제곱으로만 결정</td></tr>
+      <tr><td class="highlight">불변</td><td>JVM 시작 시 한 번 결정 후 불변. -XX:G1HeapRegionSize로 강제 지정 가능</td></tr>
+    </tbody></table></div>
+  <div class="card"><h3>Free List로 관리</h3>
+    <div class="code-block">Free List (linked list)
+  top → [R1] → [R2] → [R3] → ... → [R8] ← tail
+
+처음엔 모든 Region이 Free 상태
+필요할 때마다 top에서 pop → 역할 부여
+GC 후 비워진 Region은 다시 Free List로 반환
+→ Region의 역할은 고정되지 않고 계속 바뀐다</div>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;"><strong>Humongous Object</strong>: 한 Region 크기의 절반 초과(>50%). Humongous 전용 Region 할당. 여러 Region 크기면 연속된 Free Region들을 한 번에 할당.</div></div>
+</div>
+<div class="section" id="s3">
+  <div class="section-header"><div class="chip">Chapter 03</div><h2>Old GC가<br>더 오래 걸리는 이유</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>핵심 전제</h3>
+    <div class="info-box red" style="margin-bottom:14px;"><strong>GC는 가비지를 처리하는 게 아니라 살아있는 객체를 처리한다.</strong> 살아있는 객체가 많을수록 오래 걸린다. GC의 이름이 "garbage collector"라서 헷갈리지만 실은 <strong>live collector</strong>.</div></div>
+  <div class="card"><h3>Old GC가 느린 3가지 이유</h3>
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div style="border:1px solid rgba(239,68,68,.25);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--danger);margin-bottom:6px;">① 살아있는 객체가 더 많다</div>
+        <p style="font-size:13px;color:var(--text-dim);">Young: 가비지 많음 → 살아있는 객체 적음 → 빠름. Old: 살아있는 객체 많음 (캐시·싱글톤 등) → 느림.</p>
+      </div>
+      <div style="border:1px solid rgba(239,68,68,.25);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--danger);margin-bottom:6px;">② 사이즈가 더 크다</div>
+        <p style="font-size:13px;color:var(--text-dim);">Serial GC 기준 디폴트 Young:Old = 1:2. Old가 2배 큼 → 살아있는 객체 비율 같아도 절대량이 더 많음.</p>
+      </div>
+      <div style="border:1px solid rgba(239,68,68,.25);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--danger);margin-bottom:6px;">③ 알고리즘이 더 느리다</div>
+        <table class="data-table" style="margin-top:8px;"><thead><tr><th>GC</th><th>Young 알고리즘</th><th>Old 알고리즘</th></tr></thead>
+        <tbody>
+          <tr><td>Serial</td><td>Mark-Copy</td><td class="highlight">Mark-Sweep-Compact (compact 비쌈)</td></tr>
+          <tr><td>Parallel</td><td>Mark-Copy (병렬)</td><td class="highlight">Mark-Summary-Compact (여전히 compact)</td></tr>
+          <tr><td>CMS</td><td>Mark-Copy</td><td class="highlight">Mark-Sweep (compact 없음 → 단편화 → Full GC)</td></tr>
+        </tbody></table>
+      </div>
+    </div></div>
+</div>
+<div class="section" id="s4">
+  <div class="section-header"><div class="chip">Chapter 04</div><h2>G1GC의 3대 아이디어</h2></div>
+  <div class="card"><h3>약점 → 해결책 매핑</h3>
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div style="border:1px solid rgba(0,212,255,.3);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent);margin-bottom:6px;">① Garbage First — Region 선택 컬렉션</div>
+        <p style="font-size:13px;color:var(--text-dim);">Old Generation을 통째로 컬렉션하지 말고, <strong>가비지 많은 Old Region을 골라서 일부만 컬렉션</strong>. Old가 다 차기 전에 선제적으로. 이름의 어원: Garbage 1st.</p>
+        <div class="code-block" style="margin-top:8px;font-size:11px;">가비지 많은 Region = 살아있는 객체 적음 = 컬렉션 빨리 끝남
+                              ↓
+                   Young GC에 숟가락 얹기 가능</div>
+      </div>
+      <div style="border:1px solid rgba(16,185,129,.3);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent3);margin-bottom:6px;">② Evacuation — Mark-Copy를 Old에도</div>
+        <p style="font-size:13px;color:var(--text-dim);">Old가 다 차기 전에 컬렉션하므로 Free Region이 남아있음. 살아있는 Old 객체를 Free Region으로 <strong>대피(evacuate)</strong>. Compact 단계가 필요 없다 → 빠르다.</p>
+      </div>
+      <div style="border:1px solid rgba(124,58,237,.3);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent2);margin-bottom:6px;">③ Concurrent Marking</div>
+        <p style="font-size:13px;color:var(--text-dim);">Old 객체 마킹은 어플리케이션 스레드와 <strong>동시 실행 (STW 아님)</strong>. CMS의 좋은 부분을 계승. CMS의 문제(단편화→Full GC 폭발)는 Evacuation으로 해결.</p>
+      </div>
+    </div></div>
+</div>
+<div class="section" id="s5">
+  <div class="section-header"><div class="chip">Chapter 05</div><h2>G1GC 동작 페이즈<br>— 큰 그림</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>페이즈 흐름</h3>
+    <div class="code-block">┌──────────────────────────────────────────────────────────┐
+│                    Young-Only Phase                      │
+│  ● ● ● ● ● ● ● ● ● ● ● ● ● ●  (Young GC만)           │
+│                ↓                                         │
+│       Old 객체 임계치(IHOP) 도달 (디폴트 45%)            │
+│                ↓                                         │
+│  ● [Concurrent Start]  (Young GC에 숟가락 얹기)          │
+│  ● ● ● [Concurrent Marking]  (어플과 동시 실행)          │
+│  ● [Remark]  (STW, 마킹 마무리)                          │
+│  ● [Cleanup]  (STW, Collection Set 후보 확정)            │
+│                ↓                                         │
+│              Space Reclamation Phase                     │
+│  ◐ ◐ ◐ ◐ ◐  [Mixed Collection 여러 번]                │
+│       (Young GC + 후보 Old Region 일부씩 회수)           │
+│                ↓                                         │
+│       더 회수할 가치 없으면 → Young-Only Phase로 복귀    │
+└──────────────────────────────────────────────────────────┘</div></div>
+  <div class="card"><h3>페이즈별 STW 여부</h3>
+    <table class="data-table"><thead><tr><th>페이즈</th><th>동작</th><th>STW?</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">Young-Only</td><td>평상시 Young GC만 반복</td><td><span class="tag-yellow">STW</span></td></tr>
+      <tr><td class="highlight">Concurrent Start</td><td>GC Root가 직접 참조하는 Old 객체 Mark Stack에 push</td><td><span class="tag-yellow">STW (Young GC에 숟가락)</span></td></tr>
+      <tr><td class="highlight">Root Region Scanning</td><td>Survivor Region에서 직접 참조되는 Old 객체 추가 push</td><td><span class="tag-green">Concurrent</span></td></tr>
+      <tr><td class="highlight">Concurrent Marking</td><td>Mark Stack pop·push로 reachable Old 추적</td><td><span class="tag-green">Concurrent</span></td></tr>
+      <tr><td class="highlight">Remark</td><td>SATB Buffer 처리, weak reference 처리로 마킹 마무리</td><td><span class="tag-yellow">STW</span></td></tr>
+      <tr><td class="highlight">Cleanup</td><td>통계로 Collection Set 후보 확정 + 완전 빈 Old Region 즉시 회수</td><td><span class="tag-yellow">STW</span></td></tr>
+      <tr><td class="highlight">Mixed GC</td><td>Young GC + 후보 Old Region 일부씩 evacuate</td><td><span class="tag-yellow">STW</span></td></tr>
+    </tbody></table></div>
+</div>
+<div class="section" id="s6">
+  <div class="section-header"><div class="chip">Chapter 06</div><h2>Mixed Collection<br>— G1GC의 정체성</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>정의와 Why Piggyback</h3>
+    <div class="info-box purple" style="margin-bottom:14px;"><strong>Mixed Collection = Young GC와 함께 일부 Old Region을 같이 evacuate하는 컬렉션.</strong> 영어 용어: piggybacked (숟가락 얹기).</div>
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;">Young GC는 자주 발생 (어차피 STW 필요)</div>
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;">한 번 STW 비용을 낼 거면 그 김에 가비지 많은 Old Region 몇 개도 같이 처리</div>
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;"><strong>→ STW 횟수와 길이 모두 최소화</strong></div>
+    </div></div>
+  <div class="card"><h3>Incremental 처리</h3>
+    <div class="code-block">Cleanup 단계에서 확정된 Collection Set 후보 = {OR1, OR2, OR3, OR4, OR5}
+             ↓
+Young GC 1회: Young 전체 + {OR1, OR2}  ← 2개만 같이 처리
+Young GC 2회: Young 전체 + {OR3, OR4}  ← 또 2개
+Young GC 3회: Young 전체 + {OR5}       ← 마지막 1개</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-top:8px;"><strong>한 번에 다 처리하지 않고 incremental하게</strong> 나눠서 처리. MaxGCPauseMillis 목표를 맞추기 위해. 후보가 남아도 '회수 가치 없다'고 판단되면 중간 종료 후 Young-Only Phase로 복귀.</p></div>
+</div>
+<div class="section" id="s7">
+  <div class="section-header"><div class="chip">Chapter 07</div><h2>Concurrent Marking<br>3단계 디테일</h2></div>
+  <div class="card" style="margin-bottom:14px;"><h3>Stage 1: Concurrent Start (STW, Young GC에 숟가락)</h3>
+    <div class="code-block">GC Root ────[direct]────> Old 객체  ⟹  Mark Stack에 push
+GC Root ──> Young 객체 ──> Old 객체  ⟹  무시 (간접 참조)</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-top:8px;">GC Root가 직접 참조하는 Old 객체만 push. 간접 참조 무시 → Young GC STW 최소화.</p></div>
+  <div class="card" style="margin-bottom:14px;"><h3>Stage 2: Root Region Scanning (Concurrent)</h3>
+    <div class="code-block">Young GC 끝난 직후 Survivor Region들 = "Root Region"
+  (왜? Young GC 직후라 모두 살아있음이 보장됨)
+             ↓
+Root Region 스캔 → 직접 참조하는 Old 객체를 Mark Stack에 push</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-top:8px;"><strong>제약:</strong> 다음 Young GC 발생 전까지 끝나야 함. 못 끝내면 다음 Young GC가 대기.</p></div>
+  <div class="card"><h3>Stage 3: Concurrent Marking (Concurrent)</h3>
+    <div class="code-block">Mark Stack에서 pop → 객체의 reference 따라가며
+  - Young 객체면: 무시 (관심 밖)
+  - 이미 마킹된 Old면: 무시
+  - 처음 만난 Old면: 비트맵 1비트 표시 + Mark Stack에 push
+Mark Stack이 빌 때까지 반복. 앱은 계속 실행 중.</div>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">트라이컬러 마킹의 실체: <strong>비트맵 1비트 + Mark Stack 멤버십</strong>. Gray(진행중) = 비트맵 1 + Stack에 있음. Black(완료) = 비트맵 1 + Stack에 없음. White(미방문) = 비트맵 0.</div></div>
+</div>
+<div class="section" id="s8">
+  <div class="section-header"><div class="chip">Chapter 08</div><h2>Floating Garbage</h2><p>Concurrent Marking의 약점 — 그리고 더 심각한 문제.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Floating Garbage</h3>
+    <div class="code-block">[T0] GC가 obj11을 살아있다고 마킹
+[T1] 어플리케이션이 obj11으로 가는 참조를 끊음 (concurrent)
+[T2] obj11은 사실상 가비지인데 이미 "살아있음" 마킹됨
+  → 이번 사이클에는 살아있는 것으로 처리되어 evacuate
+  → 다음 사이클에서야 가비지로 회수됨</div>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">G1GC가 받아들이는 트레이드오프. 이점: STW 시간 대폭 감소. 비용: 한 사이클 늦게 회수되는 가비지 존재.</div></div>
+  <div class="card"><h3>더 심각한 문제 (9부 예고) — 데이터 손실!</h3>
+    <div class="code-block">[T0] obj A: Black (탐색 끝났다고 판단)
+[T1] 어플리케이션:
+     A → C  (새 참조 추가, A는 Black이라 더 안 따라감)
+     B ✗ C  (기존 Gray→White 참조 끊음)
+[T2] C는 사실 살아있는데 GC는 가비지로 판단 → 회수
+     ⟹ 데이터 손실! (치명적)</div>
+    <div class="info-box red" style="margin-top:12px;margin-bottom:0;">해결책 (9부 주제): <strong>Pre-write Barrier + SATB Buffer</strong>로 "Snapshot at the Beginning"을 유지.</div></div>
+</div>
+<div class="section" id="s9">
+  <div class="section-header"><div class="chip">Chapter 09</div><h2>Full GC<br>— G1GC의 안전망</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Full GC 발동 조건</h3>
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <div style="padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;"><strong>①</strong> Concurrent Marking 끝나기 전에 Old가 다 차버림</div>
+      <div style="padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;"><strong>②</strong> Humongous 객체 할당 실패</div>
+      <div style="padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;"><strong>③</strong> Evacuation 자체 실패</div>
+    </div></div>
+  <div class="card"><h3>Full GC 동작 방식</h3>
+    <div style="display:flex;flex-direction:column;gap:7px;margin-bottom:12px;">
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;">Mark-Sweep-Compact (Parallel)</div>
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;">완전 STW (어플리케이션 완전 정지)</div>
+      <div style="padding:10px;background:var(--surface2);border-radius:4px;font-size:13px;">매우 무거움 — 수십 초까지 갈 수도</div>
+    </div>
+    <div class="info-box red" style="margin-bottom:0;"><strong>G1GC도 Full GC 한 번 터지면 매우 아프다.</strong> 백엔드 서버에서 G1GC를 쓴다고 안심하면 안 됨. 튜닝과 모니터링이 여전히 필요. → 12부 G1GC 튜닝 가이드 참고.</div></div>
+</div>
+<div class="section" id="s10">
+  <div class="section-header"><div class="chip">Chapter 10</div><h2>면접 포인트</h2></div>
+  <div class="card"><h3>자주 헷갈리는 포인트</h3>
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div style="border:1px solid var(--border);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent);margin-bottom:6px;">Q. Mixed GC와 Concurrent Marking은 같은 건가?</div>
+        <p style="font-size:13px;color:var(--text-dim);">아니다. Concurrent Marking = Old 객체를 살아있다고 마킹하는 <strong>페이즈</strong>. Mixed Collection = 실제로 Young + 일부 Old를 evacuate하는 <strong>단일 GC 이벤트</strong>. Concurrent Marking은 Mixed Collection을 준비하기 위해 수행됨.</p>
+      </div>
+      <div style="border:1px solid var(--border);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent);margin-bottom:6px;">Q. IHOP(Initiating Heap Occupancy Percent)는?</div>
+        <p style="font-size:13px;color:var(--text-dim);">전체 힙 사이즈 대비 Old 점유 비율 임계치. 디폴트 45%. 이걸 넘으면 Concurrent Start 발동. Adaptive IHOP은 12부에서 자세히.</p>
+      </div>
+      <div style="border:1px solid var(--border);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent);margin-bottom:6px;">Q. GC Root → Old는 STW에서, Survivor → Old는 Concurrent로 push. 왜?</div>
+        <p style="font-size:13px;color:var(--text-dim);">GC Root는 어플리케이션 스택 포함 → 실행 중 계속 변함 → Concurrent로 처리하면 복잡. Survivor Region은 Young GC 직후라 위치가 고정 → 다음 Young GC 전까지 안 바뀜 → Concurrent 가능.</p>
+      </div>
+    </div></div>
+</div>
+<div id="quiz-section" style="display:none;">
+  <div class="section-header"><div class="chip">퀴즈</div><h2>실력 확인 — 20문제</h2><p>8부 핵심 개념 점검.</p></div>
+  <div id="quizMain">
+    <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="qProgressFill" style="width:0%"></div></div>
+    <div class="quiz-q-count" id="qCount">1 / 20</div>
+    <div class="quiz-question" id="qText"></div>
+    <div class="quiz-options" id="qOptions"></div>
+    <div class="quiz-explanation" id="qExplanation"></div>
+    <button class="btn btn-primary" id="qNextBtn" style="display:none;" onclick="quizNext()">다음 문제 →</button>
+  </div>
+  <div class="quiz-result" id="quizResult">
+    <div class="score-num" id="quizScore"></div>
+    <p id="quizComment"></p>
+    <button class="btn btn-ghost" style="margin-top:24px;" onclick="quizRestart()">다시 풀기</button>
+  </div>
+</div>
+</main>
+<script>
+const questions = [{"q": "G1GC가 Serial/Parallel GC의 어떤 두 약점을 해결했나?", "opts": ["느린 객체 할당 + 높은 메모리 사용량", "모든 GC가 STW + Young/Old 경계 고정", "단일 스레드 GC + Metaspace 미지원", "GC 로그 부재 + 튜닝 옵션 부족"], "ans": 1, "exp": "<strong>① 모든 GC가 STW</strong>: 멀티코어를 못 살림. <strong>② Young/Old 경계 고정</strong>: 프로세스 시작 시 결정, 트래픽 패턴 변화에 적응 불가. G1GC는 Concurrent Marking + Region 도입으로 두 약점을 동시에 해결."}, {"q": "G1GC에서 Region의 역할은?", "opts": ["Young 전용 메모리 단위", "JVM 힙을 균등하게 쪼갠 단위. 각 Region이 동적으로 Eden/Survivor/Old/Humongous 역할을 부여받음", "Old 전용 고정 메모리 단위", "GC 스레드 실행 단위"], "ans": 1, "exp": "<strong>Region = JVM 힙을 균등한 크기로 쪼갠 작은 단위.</strong> 각 Region이 동적으로 Eden/Survivor/Old/Humongous 역할을 부여받는다. 역할은 고정되지 않고 계속 바뀐다."}, {"q": "G1GC의 Region 크기를 결정하는 방식은?", "opts": ["JVM이 자유롭게 결정", "-Xmx를 디폴트 2048개 Region 목표로 나눈 크기 (단, 1·2·4·8·16·32MB 중 2의 거듭제곱)", "항상 1MB 고정", "힙 크기와 무관하게 OS가 결정"], "ans": 1, "exp": "<strong>-Xmx를 디폴트 2048개 Region 목표로 나눈 크기</strong>. 단 Region 크기는 1·2·4·8·16·32MB 중 2의 거듭제곱으로만 결정됨. 시작 시 한 번 결정 후 불변. -XX:G1HeapRegionSize로 강제 지정 가능."}, {"q": "G1GC에서 Young Generation의 특징은?", "opts": ["연속된 하나의 메모리 영역", "Eden Region들 + Survivor Region들이 힙에 흩어진 비연속 주소 공간", "항상 힙의 1/3을 차지", "Old Generation보다 항상 크다"], "ans": 1, "exp": "<strong>G1GC의 Young Generation = Eden Region들 + Survivor Region들 (흩어져 있음).</strong> 비연속 주소 공간. 덕분에 '땅따먹기'처럼 Young↔Old 비율이 유연하게 조정됨."}, {"q": "Humongous Object의 정의는?", "opts": ["힙 전체의 50% 이상", "한 Region 크기의 절반 초과(>50%)를 차지하는 거대 객체", "Young 영역을 벗어난 객체", "age가 15 이상인 객체"], "ans": 1, "exp": "<strong>Humongous Object = 한 Region 크기의 절반 초과(>50%)</strong>를 차지하는 거대 객체. Humongous 전용 Region을 받음. 여러 Region 크기이면 연속된 Free Region들을 한 번에 할당해야 함."}, {"q": "Old GC가 Young GC보다 느린 3가지 이유는?", "opts": ["스레드 수가 적음 / 알고리즘이 복잡함 / 힙 위치가 낮아서", "살아있는 객체가 더 많음 / 사이즈가 더 큼 / 알고리즘이 더 느림(Compact 필요)", "가비지가 많음 / CPU를 독점함 / 네트워크 지연", "로그가 많음 / 옵션이 복잡함 / 스레드 동기화"], "ans": 1, "exp": "① <strong>살아있는 객체가 더 많음</strong> (캐시·싱글톤 등) ② <strong>사이즈가 더 큼</strong> (Young:Old=1:2) ③ <strong>알고리즘이 더 느림</strong> — Mark-Sweep-Compact는 compact 비용이 높음. GC는 garbage가 아니라 live object를 처리하므로 live가 많을수록 느리다."}, {"q": "G1GC의 'Garbage First'가 의미하는 것은?", "opts": ["가비지가 가장 많은 Region을 먼저 생성", "Old Generation을 통째로 컬렉션하지 않고 가비지 많은 Old Region만 골라서 먼저 컬렉션", "GC를 가장 먼저 실행", "Young GC 전에 항상 Old GC"], "ans": 1, "exp": "<strong>Garbage First = 가비지가 많은(=살아있는 객체가 적은) Old Region을 골라서 먼저 컬렉션</strong>. 가비지 많은 Region = 살아있는 객체 적음 = 컬렉션이 빨리 끝남 → Young GC에 숟가락 얹기 가능. G1은 사람 이름이 아님."}, {"q": "G1GC Evacuation의 핵심 장점은?", "opts": ["더 많은 GC 스레드 사용", "살아있는 Old 객체를 Free Region으로 대피시켜 Compact 단계가 불필요 → 빠름", "Old 영역을 완전히 비움", "STW 없이 동작"], "ans": 1, "exp": "<strong>Evacuation = 살아있는 Old 객체를 Free Region으로 대피(evacuate)</strong>. Old가 다 차기 전에 컬렉션하므로 Free Region이 남아있음. 원래 Old Region은 회수. <strong>Compact 단계가 필요 없다 → 빠르다.</strong>"}, {"q": "G1GC의 Concurrent Marking이 시작되는 조건(IHOP)은?", "opts": ["Young Generation이 꽉 찼을 때", "전체 힙 대비 Old 점유 비율이 IHOP 임계치(디폴트 45%)를 넘었을 때", "Full GC가 발생했을 때", "매 Young GC마다"], "ans": 1, "exp": "<strong>IHOP(Initiating Heap Occupancy Percent) = 전체 힙 대비 Old 점유 비율 임계치. 디폴트 45%.</strong> 이를 넘으면 Concurrent Start가 발동되어 Concurrent Marking을 시작한다."}, {"q": "Mixed Collection이란?", "opts": ["Old Generation만 컬렉션하는 GC", "Young GC와 함께 일부 Old Region을 같이 evacuate하는 컬렉션 (piggybacked)", "전체 힙을 컬렉션하는 Full GC", "Concurrent하게 동작하는 GC"], "ans": 1, "exp": "<strong>Mixed Collection = Young GC와 함께 일부 Old Region을 같이 evacuate하는 컬렉션.</strong> 영어 용어: piggybacked(숟가락 얹기). Young GC가 어차피 STW를 필요로 하니 그 김에 가비지 많은 Old Region 몇 개도 같이 처리."}, {"q": "Concurrent Start 단계에서 Mark Stack에 push하는 것은?", "opts": ["모든 Old 객체", "GC Root가 직접 참조하는 Old 객체만", "Survivor 객체", "Young 객체"], "ans": 1, "exp": "<strong>GC Root가 직접 참조하는 Old 객체만</strong> Mark Stack에 push. GC Root → Young 객체 → Old 객체 같은 간접 참조는 무시. Young GC의 STW를 최소화하기 위해. 간접 참조는 Stage 2·3에서 처리."}, {"q": "Root Region Scanning이 완료되어야 하는 타이밍은?", "opts": ["Concurrent Marking 완료 전까지", "다음 Young GC 발생 전까지", "Remark 완료 전까지", "Full GC 전까지"], "ans": 1, "exp": "<strong>다음 Young GC 발생 전까지</strong> Root Region Scanning이 완료되어야 함. Survivor Region 위치가 바뀌면 스캔이 복잡해지기 때문. 만약 못 끝내면 다음 Young GC가 대기한다."}, {"q": "Concurrent Marking에서 트라이컬러 마킹의 실체는?", "opts": ["3종류의 색깔 페인트", "비트맵 1비트(방문=1/미방문=0) + Mark Stack 멤버십으로 Gray/Black/White 구분", "3개의 별도 메모리 영역", "GC 스레드 3종류"], "ans": 1, "exp": "<strong>트라이컬러 마킹의 실체: 비트맵 1비트 + Mark Stack 멤버십.</strong> 검은 테두리+Stack에 있음=Gray(진행 중), 검은 테두리+Stack에 없음=Black(완료), 테두리 없음=White(미방문). 강사: '세 가지 색으로 부르는 것보다 비트맵+스택 멤버십으로 보는 게 더 정확하다.'"}, {"q": "Floating Garbage란?", "opts": ["힙 밖에 있는 가비지", "Concurrent Marking 도중 앱이 참조를 끊어 가비지가 됐지만 이미 살아있다고 마킹되어 이번 사이클에 회수되지 못하는 객체", "Young에서 Old로 promotion된 가비지", "Full GC 후 남은 가비지"], "ans": 1, "exp": "<strong>Floating Garbage</strong>: GC가 살아있다고 마킹한 후, 앱이 참조를 끊어 가비지가 됐지만 이미 'live' 마킹됨 → 이번 사이클 회수 불가 → 다음 사이클에야 회수. G1GC가 받아들이는 트레이드오프: STW 감소 vs 한 사이클 늦게 회수."}, {"q": "Concurrent Marking의 치명적 문제(9부 예고)는?", "opts": ["Floating Garbage 발생", "Black 객체가 새 참조(→ White)를 추가하고 기존 Gray→White 참조가 끊기면 White가 live인데 가비지로 판단 → 데이터 손실!", "마킹이 너무 느림", "Survivor Region 위치가 바뀜"], "ans": 1, "exp": "<strong>Black(탐색 완료) 객체가 새 White 참조를 추가 + 기존 Gray→White 참조가 끊김 → White는 live인데 GC는 가비지로 판단 → 데이터 손실!</strong> 해결책(9부): Pre-write Barrier + SATB Buffer로 'Snapshot at the Beginning' 유지."}, {"q": "G1GC에서 Full GC가 발동되는 조건이 아닌 것은?", "opts": ["Concurrent Marking 끝나기 전에 Old가 다 차버림", "Humongous 객체 할당 실패", "Young Generation이 꽉 참", "Evacuation 자체 실패"], "ans": 2, "exp": "Young Generation이 꽉 차면 <strong>Young GC(Minor GC)</strong>가 발생. G1GC의 Full GC 발동 조건: ① Concurrent Marking 끝나기 전 Old가 다 참 ② Humongous 객체 할당 실패 ③ Evacuation 실패. Full GC는 Mark-Sweep-Compact(Parallel), 매우 무거움."}, {"q": "Mixed GC가 incremental하게 나눠서 Old Region을 처리하는 이유는?", "opts": ["GC 스레드가 부족해서", "MaxGCPauseMillis 목표를 맞추기 위해 — 한 번에 다 처리하면 STW가 너무 길어짐", "Old Region 수가 너무 많아서", "메모리가 부족해서"], "ans": 1, "exp": "<strong>MaxGCPauseMillis 목표를 맞추기 위해.</strong> 후보 Old Region을 한 번에 다 처리하면 STW가 목표를 초과할 수 있음. Young GC마다 일부씩 나눠서 처리. '회수해봤자 의미 없겠다'고 판단되면 중간 종료 후 Young-Only Phase로 복귀."}, {"q": "G1GC의 STW 정리에서 올바른 것은?", "opts": ["모든 페이즈가 Concurrent", "Concurrent Marking만 Concurrent, 나머지(Young GC, Mixed GC, Remark, Cleanup, Full GC)는 STW", "모든 페이즈가 STW", "Young GC만 STW, 나머지는 Concurrent"], "ans": 1, "exp": "<strong>Concurrent = Concurrent Marking, Root Region Scanning (일부).</strong> STW = Young GC, Concurrent Start(Young GC에 숟가락), Mixed GC, Remark, Cleanup, Full GC. G1GC는 'Mostly Concurrent' — 보통은 Concurrent하게 동작하지만 STW가 완전히 0은 아님."}, {"q": "G1GC에서 Region 크기가 시작 시 고정되는 이유는?", "opts": ["JVM 구현의 편의", "비트맵·RemSet 등 자료구조들이 Region 단위로 정렬되어 런타임에 바꾸기 어렵고, 바꿔봤자 이득보다 복잡도 비용이 큼", "OS 제한", "GC 스레드 수 제한"], "ans": 1, "exp": "<strong>비트맵·RemSet 등 자료구조들이 Region 단위로 정렬</strong>되어 있어 런타임에 바꾸기 어려움. 또한 다이나믹하게 바꿔봤자 이득보다 복잡도 비용이 큼. -XX:G1HeapRegionSize로 시작 전에 강제 지정 가능."}, {"q": "Mixed Collection에서 외부 참조를 갱신하는 방법은?", "opts": ["힙 전체를 다시 스캔", "각 Old Region의 Remembered Set이 '이 Region 안 객체를 외부에서 참조하는 주소 목록'을 가지고 있어 이를 통해 외부 참조자를 찾아 업데이트", "GC Root에서 다시 탐색", "어플리케이션이 직접 처리"], "ans": 1, "exp": "Mixed GC에서 Old 객체를 evacuate하면 주소가 바뀜. <strong>각 Old Region의 Remembered Set</strong>이 '이 Region 안 객체를 외부에서 참조하는 주소 목록'을 가짐. 이 RS로 외부 참조자를 찾아 새 주소로 업데이트. 자세한 RS 메커니즘은 10부에서."}];
+
+let qIdx=0,score=0,answered=false;
+function goTo(id){
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  const qs=document.getElementById('quiz-section');
+  if(id==='quiz'){
+    document.querySelectorAll('.section').forEach(s=>s.style.display='none');
+    qs.style.display='block'; quizStart();
+  } else {
+    qs.style.display='none';
+    document.querySelectorAll('.section').forEach(s=>s.style.display='');
+    const t=document.getElementById(id); if(t)t.classList.add('active');
+  }
+  document.querySelectorAll('.nav-item').forEach(n=>{
+    if((id==='quiz'&&n.textContent.includes('퀴즈'))||n.getAttribute('onclick')?.includes(id))n.classList.add('active');
+  });
+}
+function quizStart(){qIdx=0;score=0;answered=false;document.getElementById('quizMain').style.display='block';document.getElementById('quizResult').classList.remove('show');renderQ();}
+function renderQ(){
+  answered=false;
+  const q=questions[qIdx];
+  document.getElementById('qCount').textContent=`${qIdx+1} / ${questions.length}`;
+  document.getElementById('qProgressFill').style.width=`${(qIdx/questions.length)*100}%`;
+  document.getElementById('qText').textContent=q.q;
+  document.getElementById('qExplanation').className='quiz-explanation';
+  document.getElementById('qNextBtn').style.display='none';
+  const keys=['A','B','C','D'];
+  const c=document.getElementById('qOptions');c.innerHTML='';
+  q.opts.forEach((opt,i)=>{
+    const b=document.createElement('button');b.className='quiz-opt';
+    b.innerHTML=`<span class="opt-key">${keys[i]}</span>${opt}`;
+    b.onclick=()=>selectAnswer(i);c.appendChild(b);
+  });
+}
+function selectAnswer(i){
+  if(answered)return;answered=true;
+  const q=questions[qIdx];
+  const btns=document.querySelectorAll('.quiz-opt');
+  btns.forEach(b=>b.disabled=true);
+  if(i===q.ans){btns[i].classList.add('correct');score++;}
+  else{btns[i].classList.add('wrong');btns[q.ans].classList.add('correct');}
+  const exp=document.getElementById('qExplanation');exp.innerHTML=q.exp;exp.classList.add('show');
+  document.getElementById('qNextBtn').style.display='inline-block';
+  document.getElementById('qNextBtn').textContent=qIdx<questions.length-1?'다음 문제 →':'결과 보기 →';
+}
+function quizNext(){qIdx++;if(qIdx>=questions.length)showResult();else renderQ();}
+function showResult(){
+  document.getElementById('quizMain').style.display='none';
+  const pct=Math.round((score/questions.length)*100);
+  document.getElementById('quizScore').textContent=`${score} / ${questions.length}`;
+  let c='';
+  if(pct>=90)c='완벽합니다 🎉 다음 파트로!';
+  else if(pct>=70)c='잘 하셨어요 👍 틀린 챕터를 복습해보세요.';
+  else if(pct>=50)c='절반 통과 ✨ 핵심 챕터를 한 번 더 읽어보세요.';
+  else c='복습이 필요해요 📖 처음부터 다시 읽어보세요.';
+  document.getElementById('quizComment').textContent=`${pct}% 정답률 — ${c}`;
+  document.getElementById('quizResult').classList.add('show');
+}
+function quizRestart(){quizStart();}
+
+</script>
+</body>
+</html>

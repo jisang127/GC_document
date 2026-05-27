@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC 14부 — Metaspace와 Pointer-size</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav id="sidebar">
+  <a class="nav-home" href="index.html">← 목차로</a>
+  <div class="logo"><div class="tag">GC 14부</div><h1 style="font-family:var(--display);font-size:20px;color:#fff;margin-top:4px;line-height:1.2;">Metaspace와 Pointer-size</h1></div>
+  <nav>
+<div class="nav-item active" onclick="goTo('s0')"><span class="num">00</span> 개요 (TL;DR)</div>
+<div class="nav-item" onclick="goTo('s1')"><span class="num">01</span> Metaspace 위치와 역할</div>
+<div class="nav-item" onclick="goTo('s2')"><span class="num">02</span> Metaspace 내부 구조</div>
+<div class="nav-item" onclick="goTo('s3')"><span class="num">03</span> 클래스 로더 생명주기</div>
+<div class="nav-item" onclick="goTo('s4')"><span class="num">04</span> Metaspace GC 트리거</div>
+<div class="nav-item" onclick="goTo('s5')"><span class="num">05</span> GC 로그 분석</div>
+<div class="nav-item" onclick="goTo('s6')"><span class="num">06</span> UseCompressedOops</div>
+<div class="nav-item" onclick="goTo('s7')"><span class="num">07</span> UseCompressedClassPointers</div>
+<div class="nav-item" onclick="goTo('s8')"><span class="num">08</span> UseCompactObjectHeaders</div>
+<div class="nav-item" onclick="goTo('s9')"><span class="num">09</span> 실전 튜닝 권장값</div>
+<div class="nav-item" onclick="goTo('s10')"><span class="num">10</span> 면접 포인트 총정리</div>
+    <div class="nav-item" onclick="goTo('quiz')" style="margin-top:10px;border-top:1px solid var(--border);padding-top:14px;"><span class="num">🧪</span> 퀴즈 (20문제)</div>
+  </nav>
+</nav>
+<main id="main">
+<div class="section active" id="s0">
+  <div class="section-header"><div class="chip">GC 14부</div><h2>Metaspace와<br>Pointer-size</h2><p>GC는 힙의 객체만 회수하는가? NO. Metaspace의 클래스 메타데이터도 회수 대상이다.</p></div>
+  <div class="info-box purple"><strong>면접 포인트:</strong> "GC는 힙의 객체만 회수하는가?" → <strong>NO</strong>. JVM 힙 밖 Metaspace 영역의 클래스 메타데이터도 GC가 회수한다.</div>
+  <div style="margin-top:16px;">
+    <table class="data-table"><thead><tr><th>토픽</th><th>한 줄 요약</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">Metaspace 위치</td><td>JVM 힙 밖의 네이티브 메모리. 클래스 메타데이터 저장</td></tr>
+      <tr><td class="highlight">GC 트리거</td><td>커밋된 양이 High Water Mark 도달 → GC 발동 (Full GC만이 아님)</td></tr>
+      <tr><td class="highlight">클래스 회수 3조건</td><td>① 인스턴스 unreachable ② 직접 참조 0 ③ 로더 자체 unreachable</td></tr>
+      <tr><td class="highlight">UseCompressedOops</td><td>일반 객체 포인터 64→32비트 (디폴트 ON). 힙 ≤ 32GB까지 커버</td></tr>
+      <tr><td class="highlight">UseCompressedClassPointers</td><td>클래스 포인터 64→32비트 (JDK 25 deprecated, 27 제거)</td></tr>
+      <tr><td class="highlight">UseCompactObjectHeaders</td><td>JDK 25 정식. 헤더 16→8바이트. 안 쓸 이유 없음</td></tr>
+      <tr><td class="highlight">튜닝 핵심</td><td class="code">-XX:MetaspaceSize=256M -XX:MaxMetaspaceSize=512M 권장</td></tr>
+    </tbody></table>
+  </div>
+</div>
+<div class="section" id="s1">
+  <div class="section-header"><div class="chip">Chapter 01</div><h2>Metaspace<br>위치와 역할</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>JVM 프로세스 메모리 구조</h3>
+    <div class="code-block">+--------------------------------------------------------------+
+| JVM Process Memory (Virtual Address Space)               |
+|                                                          |
+|  +-----------------------+  +--------------------------+  |
+|  |      JVM Heap         |  |       Metaspace          |  |
+|  |  (Young + Old gen)    |  |    (네이티브 메모리)      |  |
+|  |  - 객체 인스턴스      |  |  - 클래스 메타데이터     |  |
+|  +-----------------------+  +--------------------------+  |
+|         ^                            ^                   |
+|      GC 주 대상             **GC 부 대상 (가끔)**         |
++--------------------------------------------------------------+</div></div>
+  <div class="card" style="margin-bottom:16px;"><h3>핵심 속성</h3>
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <div style="padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;">Metaspace는 JVM 힙 밖 — 통칭 <strong>네이티브 메모리(Native Memory)</strong></div>
+      <div style="padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;"><strong>클래스 메타데이터</strong>(타입, 필드, 메서드, 상수풀)를 저장</div>
+      <div style="padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;">"메타" = 무언가를 설명하는 데이터 → 클래스 자체를 설명하는 데이터</div>
+    </div></div>
+  <div class="info-box green"><strong>Metaspace도 GC 대상이다.</strong> Serial/Parallel GC는 Full GC 때만 Metaspace 청크 회수. G1GC/ZGC는 Full GC가 아니더라도 concurrent하게 Metaspace 영역도 컬렉팅 가능.</div>
+</div>
+<div class="section" id="s2">
+  <div class="section-header"><div class="chip">Chapter 02</div><h2>Metaspace<br>내부 구조</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>자료구조 계층</h3>
+    <div class="code-block">VirtualSpaceList (= Metaspace 전체)
+ │
+ ├── VirtualSpaceNode #1 (mmap으로 reserve된 연속 주소 공간)
+ │    ├── Chunk A1 ─┐
+ │    ├── Chunk A2 ─┤── ClassLoader A에 바인딩
+ │    └── Chunk B1 ─── ClassLoader B에 바인딩
+ │
+ ├── VirtualSpaceNode #2 (Double Linked List로 연결)
+ │    └── Chunk C1 ─── ClassLoader C에 바인딩
+ │
+ └── ...</div></div>
+  <div class="card" style="margin-bottom:16px;"><h3>개념 설명</h3>
+    <table class="data-table"><thead><tr><th>개념</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">VirtualSpaceList</td><td>Metaspace 전체. 더블 링크드 리스트. 연속된 주소 공간 아닐 수 있음</td></tr>
+      <tr><td class="highlight">VirtualSpaceNode</td><td>mmap reserve된 연속된 주소 공간. 하나의 노드 내부는 항상 연속</td></tr>
+      <tr><td class="highlight">Chunk</td><td>클래스 로더 단위 할당의 최소 단위. 크기는 가변 (로더 특성/메타데이터 양에 따라)</td></tr>
+    </tbody></table></div>
+  <div class="info-box">청크는 반드시 <strong>단일 클래스 로더에 바인딩</strong>. 거꾸로: 한 클래스 로더는 여러 청크 보유 가능 (여러 노드에 걸쳐서도 OK).</div>
+</div>
+<div class="section" id="s3">
+  <div class="section-header"><div class="chip">Chapter 03</div><h2>클래스 로더<br>생명주기 ★★</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>두 종류의 클래스 로더</h3>
+    <table class="data-table"><thead><tr><th>종류</th><th>대표 예</th><th>생명주기</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">기본 로더</td><td>Bootstrap, Application, System ClassLoader</td><td><strong>JVM 프로세스와 동일</strong> → 죽을 때까지 살아있음</td></tr>
+      <tr><td class="highlight">동적 로더</td><td>AOP 프록시용 로더 등</td><td>다이나믹하게 생성/회수됨</td></tr>
+    </tbody></table></div>
+  <div class="card" style="margin-bottom:16px;"><h3>클래스 메타데이터(청크) 회수의 3가지 AND 조건</h3>
+    <div class="code-block">[조건 1] 해당 클래스 타입의 모든 인스턴스가 unreachable
+              AND
+[조건 2] 해당 클래스의 java.lang.Class 객체에 대한 참조 0
+         (리플렉션 보유 참조, static 멤버를 통한 도달 경로 등 모두 없음)
+              AND
+[조건 3] *** 해당 클래스를 로딩한 ClassLoader 객체 자체가 unreachable ***
+              ↓
+         청크 회수 → 재사용 or OS 반환</div>
+    <div class="info-box red" style="margin-bottom:0;"><strong>3번 조건이 결정적.</strong> 기본 클래스 로더는 JVM과 생명주기 동일 → 절대 unreachable 안 됨 → 그 로더가 로딩한 클래스 메타데이터는 <strong>결코 회수되지 않는다.</strong></div></div>
+  <div class="card"><h3>IntelliJ Hot Reload 동작 원리</h3>
+    <div class="code-block">[Before Edit]          [After Edit, App 살아있는 채로]
+  ClassLoader-1          ClassLoader-1 (KILL 대상)
+  └── UserClass v1       └── UserClass v1
+                         ClassLoader-2 (NEW)
+                         └── UserClass v2
+                              ↑ 이제 이걸 사용</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-top:8px;">기존 ClassLoader를 죽이고 새 ClassLoader 생성 → 바뀐 클래스를 새로 로딩. 옛 로더는 unreachable → GC가 청크 회수.</p></div>
+</div>
+<div class="section" id="s4">
+  <div class="section-header"><div class="chip">Chapter 04</div><h2>Metaspace GC 트리거<br>— High Water Mark</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>-XX:MetaspaceSize — 이름 함정</h3>
+    <div class="info-box yellow" style="margin-bottom:14px;">⚠️ 이름만 보면 "Metaspace 초기 사이즈"처럼 보이지만 <strong>아님!</strong> 실제로는 <strong>HWM(임계치)의 초기값</strong> = "메타스페이스가 이만큼 차면 GC를 트리거하라"는 목표치.</div>
+    <table class="data-table"><thead><tr><th>환경</th><th>디폴트 값</th></tr></thead>
+    <tbody>
+      <tr><td>OpenJDK 25 / 32비트 OS</td><td class="highlight">12~16MB</td></tr>
+      <tr><td>OpenJDK 25 / 64비트 OS</td><td class="highlight">16~21MB</td></tr>
+    </tbody></table>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">생각보다 매우 작다. Heap이 GB 단위인 것에 비해 Metaspace는 MB 단위. <strong>128MB 또는 256MB로 키우는 것을 권장.</strong></div></div>
+  <div class="card"><h3>HWM 동적 조정</h3>
+    <div class="code-block">GC 후 free 영역 비율 계산:
+  free% = (커밋된 양 - 사용된 양) / 커밋된 양
+
+if free% &lt; MinMetaspaceFreeRatio (디폴트 40%)
+  → HWM을 살짝 올림 (다음 GC 늦춤)
+elif free% &gt; MaxMetaspaceFreeRatio (디폴트 70%)
+  → HWM을 살짝 낮춤
+else
+  → 유지</div></div>
+</div>
+<div class="section" id="s5">
+  <div class="section-header"><div class="chip">Chapter 05</div><h2>GC 로그 분석</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>Metadata GC Threshold 로그 예시</h3>
+    <div class="code-block">[Pause Young (Metadata GC Threshold)]  ← Metaspace 이슈로 Young GC 트리거
+  ... Eden ... Survivor ... Old ...
+  Metaspace: used=XX, capacity=YY, committed=ZZ, reserved=WW  ← 변화 거의 없음
+
+[Pause Full (Metadata GC Threshold)]   ← 이어서 Full GC 트리거
+  ... Old 영역 줄어듦 ...
+  Metaspace: used=XX, capacity=YY, committed=ZZ, reserved=WW  ← 약간 증가</div></div>
+  <div class="card"><h3>Metaspace 로그 용어</h3>
+    <table class="data-table"><thead><tr><th>용어</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">used</td><td>클래스 메타데이터를 실제로 저장하는 데 쓰는 크기</td></tr>
+      <tr><td class="highlight">capacity</td><td>커밋된 영역 중 청크화까지 완료되어 메타데이터 저장 가능한 크기</td></tr>
+      <tr><td class="highlight">committed</td><td>OS에 "이만큼 실제로 쓸 거다"고 요청해 mmap된 영역</td></tr>
+      <tr><td class="highlight">reserved</td><td>mmap으로 미리 예약만 해둔 가상주소 공간</td></tr>
+    </tbody></table>
+    <div class="info-box" style="margin-top:12px;margin-bottom:0;">로그 해석: <strong>used → capacity → committed → reserved</strong> 순으로 커진다. <strong>used가 committed에 가까워지면</strong> 곧 GC 트리거.</div></div>
+</div>
+<div class="section" id="s6">
+  <div class="section-header"><div class="chip">Chapter 06</div><h2>UseCompressedOops</h2><p>일반 객체 포인터를 64→32비트로 압축. 디폴트 ON.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>핵심 개념</h3>
+    <div class="info-box purple" style="margin-bottom:14px;">OOP = <strong>O</strong>rdinary <strong>O</strong>bject <strong>P</strong>ointer (객체지향 프로그래밍 아님!)</div>
+    <div class="code-block">Java 객체 주소는 항상 8바이트 정렬 (하위 3비트 = 000)
+
+저장: [ 32비트 압축 OOP ]  (하위 3비트 생략)
+복원: 좌측으로 3비트 시프트 → 실제 35비트 주소
+     = 2^35 = 2^5 × 2^30 = 32GB 커버</div></div>
+  <div class="card" style="margin-bottom:16px;"><h3>커버 범위 비교</h3>
+    <table class="data-table"><thead><tr><th>표현 방식</th><th>커버 사이즈</th></tr></thead>
+    <tbody>
+      <tr><td>32비트 (raw, 시프트 없음)</td><td>4GB</td></tr>
+      <tr><td class="highlight">32비트 + 3비트 시프트 (실효 35비트)</td><td><strong>32GB</strong></td></tr>
+    </tbody></table></div>
+  <div class="info-box yellow">⚠️ 힙 크기 <strong>32GB 초과 시 자동 OFF</strong> → 64비트 주소 사용 → 객체 크기 증가 → GC 부담↑. 31GB 정도까지만 쓰는 게 32GB로 살짝 키우는 것보다 효율적인 구간이 있다.</div>
+</div>
+<div class="section" id="s7">
+  <div class="section-header"><div class="chip">Chapter 07</div><h2>UseCompressedClassPointers</h2><p>객체 헤더의 클래스 포인터를 64→32비트로 압축. 디폴트 ON.</p></div>
+  <div class="card" style="margin-bottom:16px;"><h3>객체 헤더 구조</h3>
+    <div class="code-block">[Object Header]
+┌─────────────────────┬───────────────────┐
+│   Mark Word (8B)    │   Class Pointer   │
+│  - age (GC 생존수)  │                   │
+│  - lock state       │  Compressed:  4B  │ ← UseCompressedClassPointers=true
+│  - hash code        │  Uncompressed: 8B │ ← false
+└─────────────────────┴───────────────────┘
+배열이면 추가: +4B (배열 길이)</div></div>
+  <div class="card" style="margin-bottom:16px;"><h3>헤더 크기 비교</h3>
+    <table class="data-table"><thead><tr><th>Mark Word</th><th>Class Pointer</th><th>합계 (일반)</th><th>합계 (배열)</th></tr></thead>
+    <tbody>
+      <tr><td>8B</td><td>8B (uncompressed)</td><td>16B</td><td>20B</td></tr>
+      <tr><td>8B</td><td class="highlight">4B (compressed)</td><td class="highlight">12B</td><td class="highlight">16B</td></tr>
+    </tbody></table></div>
+  <div class="info-box red"><strong>JDK 25부터 deprecated</strong> — JDK 27에서는 옵션 자체가 삭제. 이후 무조건 압축 사용.</div>
+</div>
+<div class="section" id="s8">
+  <div class="section-header"><div class="chip">Chapter 08</div><h2>UseCompactObjectHeaders<br>(JDK 25 정식 ★)</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>헤더 변천사</h3>
+    <div class="code-block">압축 옵션 없을 때: [Mark Word 8B][Class Ptr 8B]      = 16B
+↓ UseCompressedClassPointers (Java 8+ 디폴트 ON)
+Java 8~24:        [Mark Word 8B][Class Ptr 4B]+pad = 12B
+↓ UseCompactObjectHeaders (JDK 25 정식)
+Java 25+:         [Mark+Class 합쳐서 8B]            =  8B
+배열이면:         [8B] + [length 4B]                = 12B</div></div>
+  <div class="card" style="margin-bottom:16px;"><h3>동작 방식</h3>
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <div style="padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;"><strong>기존:</strong> 클래스 포인터가 주소 오프셋 방식 (위치 기반)</div>
+      <div style="padding:11px;background:var(--surface2);border-radius:4px;font-size:13px;"><strong>신규:</strong> 64비트 안에 22비트를 클래스 포인터로 사용 → 클래스 자체를 식별. 2^22 = 4M = <strong>최대 400만 개 클래스</strong> 식별 가능</div>
+    </div></div>
+  <div class="card" style="margin-bottom:16px;"><h3>사용 방법</h3>
+    <table class="data-table"><thead><tr><th>JDK 버전</th><th>사용 방법</th></tr></thead>
+    <tbody>
+      <tr><td>JDK 24</td><td class="code">-XX:+UnlockExperimentalVMOptions -XX:+UseCompactObjectHeaders (실험)</td></tr>
+      <tr><td class="highlight">JDK 25+</td><td class="code">-XX:+UseCompactObjectHeaders (정식, 디폴트는 OFF)</td></tr>
+    </tbody></table></div>
+  <div class="info-box green"><strong>이건 안 쓸 이유가 없는 옵션.</strong> 객체 크기↓ → GC 빈도↓, 캐시 히트율↑ → throughput↑. 단점 없음. JDK 25+이면 켜는 것 추천.</div>
+</div>
+<div class="section" id="s9">
+  <div class="section-header"><div class="chip">Chapter 09</div><h2>실전 튜닝 권장값</h2></div>
+  <div class="card" style="margin-bottom:16px;"><h3>추천 옵션 세트</h3>
+    <div class="code-block"># Metaspace 튜닝
+-XX:MaxMetaspaceSize=512m    # 무한대 디폴트 → 명시적 제한 (OOM 조기 발견)
+-XX:MetaspaceSize=256m       # 초기 HWM (디폴트 12~21MB는 너무 작음)
+
+# Compact Headers (JDK 25+)
+-XX:+UseCompactObjectHeaders # 디폴트 OFF, 켜는 것 추천
+
+# System.gc() 무력화 (라이브러리에 박혀있는 경우)
+-XX:+DisableExplicitGC
+
+# Compressed OOPs / Class Pointers는 디폴트 ON이라 명시 불필요</div></div>
+  <div class="card"><h3>각 옵션의 이유</h3>
+    <table class="data-table"><thead><tr><th>옵션</th><th>이유</th></tr></thead>
+    <tbody>
+      <tr><td class="highlight">MaxMetaspaceSize=512m</td><td>디폴트=무한대. 메모리 릭 시 컨테이너 OOM Killer에 죽기 전까지 계속 증가. 명시하면 OOM 조기 발견.</td></tr>
+      <tr><td class="highlight">MetaspaceSize=256m</td><td>HWM 초기값이 너무 작아 JVM 초반에 Metadata GC Threshold가 자주 발생.</td></tr>
+      <tr><td class="highlight">UseCompactObjectHeaders</td><td>단점 없고 throughput만 올라감. JDK 25+ 사용 시 켜는 것 추천.</td></tr>
+      <tr><td class="highlight">DisableExplicitGC</td><td>라이브러리 내 System.gc()는 내가 수정 불가. 옵션으로 무력화.</td></tr>
+    </tbody></table>
+    <div class="info-box yellow" style="margin-top:12px;margin-bottom:0;">CompressedClassSpaceSize는 직접 튜닝 X. MaxMetaspaceSize와 묶여 자동 조정됨 (예: MaxMetaspaceSize=512m → ClassSpace도 ~420MB로 자동 축소).</div></div>
+</div>
+<div class="section" id="s10">
+  <div class="section-header"><div class="chip">Chapter 10</div><h2>면접 포인트<br>총정리</h2></div>
+  <div class="card"><h3>자주 헷갈리는 포인트</h3>
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div style="border:1px solid var(--border);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent);margin-bottom:6px;">Q1. GC는 힙 안의 객체만 회수하는가?</div>
+        <p style="font-size:13px;color:var(--text-dim);">보통은 그렇지만, <strong>JVM 힙 밖의 Metaspace 영역(클래스 메타데이터)도 회수 대상</strong>. 단 3조건 AND 충족 시.</p>
+      </div>
+      <div style="border:1px solid var(--border);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent);margin-bottom:6px;">Q2. -XX:MetaspaceSize는 초기 사이즈인가?</div>
+        <p style="font-size:13px;color:var(--text-dim);"><strong>NO. GC 트리거 임계치(HWM)의 초기값</strong>이다. 이름이 함정.</p>
+      </div>
+      <div style="border:1px solid var(--border);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent);margin-bottom:6px;">Q3. Compressed OOPs가 32GB까지만 커버하는 이유?</div>
+        <p style="font-size:13px;color:var(--text-dim;">8바이트 정렬 덕분에 32비트 압축 OOP에 3비트 시프트 적용 = 실효 35비트 (2^35 = 32GB).</p>
+      </div>
+      <div style="border:1px solid var(--border);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent);margin-bottom:6px;">Q4. CompressedOops와 CompressedClassPointers 차이?</div>
+        <p style="font-size:13px;color:var(--text-dim);">OOPs = 일반 객체 참조 포인터 압축 (객체→객체). ClassPointers = 객체 헤더 안의 클래스 포인터 압축.</p>
+      </div>
+      <div style="border:1px solid var(--border);border-radius:6px;padding:14px 16px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent);margin-bottom:6px;">Q5. AOP를 많이 쓰면 왜 Metaspace 이슈가?</div>
+        <p style="font-size:13px;color:var(--text-dim);">AOP 프록시 클래스 → 동적으로 ClassLoader 생성·소멸 → 클래스 메타데이터 Metaspace 누적 → 회수 조건 만족 전까지 점유 → HWM 도달 시 GC 폭주.</p>
+      </div>
+      <div style="border:1px solid rgba(16,185,129,.3);border-radius:6px;padding:14px 16px;background:rgba(16,185,129,.04);">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--accent3);margin-bottom:6px;">Q6. Compact Object Headers는 켜야 하나?</div>
+        <p style="font-size:13px;color:var(--text-dim);">JDK 25+이면 <strong>YES</strong>. 단점 없고 throughput만 올라간다. 디폴트가 OFF인 건 호환성 검증 단계.</p>
+      </div>
+    </div></div>
+</div>
+<div id="quiz-section" style="display:none;">
+  <div class="section-header"><div class="chip">퀴즈</div><h2>실력 확인 — 20문제</h2><p>14부 핵심 개념 점검.</p></div>
+  <div id="quizMain">
+    <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="qProgressFill" style="width:0%"></div></div>
+    <div class="quiz-q-count" id="qCount">1 / 20</div>
+    <div class="quiz-question" id="qText"></div>
+    <div class="quiz-options" id="qOptions"></div>
+    <div class="quiz-explanation" id="qExplanation"></div>
+    <button class="btn btn-primary" id="qNextBtn" style="display:none;" onclick="quizNext()">다음 문제 →</button>
+  </div>
+  <div class="quiz-result" id="quizResult">
+    <div class="score-num" id="quizScore"></div>
+    <p id="quizComment"></p>
+    <button class="btn btn-ghost" style="margin-top:24px;" onclick="quizRestart()">다시 풀기</button>
+  </div>
+</div>
+</main>
+<script>
+const questions = [{"q": "Metaspace의 위치는?", "opts": ["JVM 힙(Young+Old) 내부", "JVM 힙 밖의 네이티브 메모리", "Code Cache와 동일한 영역", "Stack 메모리 영역"], "ans": 1, "exp": "<strong>Metaspace는 JVM 힙 밖 — 네이티브 메모리(Native Memory)</strong>. 클래스 메타데이터(타입, 필드, 메서드, 상수풀)를 저장. JVM 힙에는 객체 인스턴스, Metaspace에는 클래스를 설명하는 데이터."}, {"q": "Metaspace GC 트리거 조건은?", "opts": ["JVM 힙이 꽉 찼을 때", "커밋된 Metaspace 공간이 High Water Mark(HWM)에 도달했을 때", "Full GC만이 트리거 가능", "JVM 시작 후 일정 시간마다"], "ans": 1, "exp": "<strong>커밋된 Metaspace 공간이 High Water Mark(HWM)에 도달했을 때</strong> GC 트리거. Full GC만이 아님. G1GC/ZGC는 Full GC 없이도 concurrent하게 Metaspace를 컬렉팅 가능."}, {"q": "-XX:MetaspaceSize 옵션의 실제 의미는?", "opts": ["Metaspace 초기 사이즈 설정", "GC 트리거 임계치(HWM)의 초기값", "Metaspace 최대 크기", "Compressed Class Space 크기"], "ans": 1, "exp": "이름 함정! <strong>MetaspaceSize는 Metaspace 초기 사이즈가 아니라 HWM(High Water Mark)의 초기값</strong>. '메타스페이스가 이만큼 차면 GC를 트리거하라'는 목표치. 디폴트 16~21MB는 너무 작아서 128M~256M으로 키우는 것을 권장."}, {"q": "클래스 메타데이터(청크) 회수의 3가지 AND 조건은?", "opts": ["①인스턴스 unreachable ②직접 참조 0 ③로더 자체 unreachable", "①힙이 꽉 참 ②Full GC 발동 ③클래스 오래됨", "①클래스 언로드 명시 ②GC 요청 ③힙 부족", "①인스턴스 없음 ②로더 종료 ③힙 압박"], "ans": 0, "exp": "3가지 모두 AND 조건: ① 해당 클래스의 모든 인스턴스 unreachable ② java.lang.Class 객체 직접 참조 0 ③ <strong>해당 클래스를 로딩한 ClassLoader 객체 자체가 unreachable</strong>. 3번이 결정적."}, {"q": "Bootstrap/Application ClassLoader가 로딩한 클래스가 절대 회수되지 않는 이유는?", "opts": ["회수 비용이 너무 커서", "기본 클래스 로더는 JVM 프로세스와 생명주기 동일 → 절대 unreachable이 되지 않음", "JVM 버그", "디폴트 설정이 회수를 막아서"], "ans": 1, "exp": "<strong>기본 클래스 로더(Bootstrap, Application, System)는 JVM 프로세스와 생명주기가 동일</strong> → 절대 unreachable이 안 됨 → 조건 3 미충족 → 클래스 메타데이터 결코 회수 안 됨."}, {"q": "IntelliJ Hot Reload가 가능한 메커니즘은?", "opts": ["기존 클래스를 직접 수정", "기존 ClassLoader를 unreachable하게 만들고 새 ClassLoader로 바뀐 클래스를 로딩", "JVM을 재시작", "메모리를 직접 수정"], "ans": 1, "exp": "<strong>기존 ClassLoader를 죽이고(unreachable) → 새 ClassLoader 생성 → 바뀐 클래스를 새로 로딩</strong>. 옛 로더가 unreachable → GC가 그 청크들 회수. 실무 Docker 배포에서는 인스턴스 자체 kill 후 새 인스턴스 방식이라 불필요."}, {"q": "UseCompressedOops에서 OOP의 뜻은?", "opts": ["Object Oriented Programming", "Ordinary Object Pointer", "Optimized Object Pointer", "Out Of Process"], "ans": 1, "exp": "OOP = <strong>Ordinary Object Pointer</strong>. 객체지향 프로그래밍(Object-Oriented Programming)의 약자가 아님! 일반 객체 포인터(객체 → 객체 참조)를 64비트에서 32비트로 압축하는 옵션."}, {"q": "UseCompressedOops가 32GB 힙까지만 커버하는 이유는?", "opts": ["JVM 설계 한계", "Java 객체는 8바이트 정렬 → 하위 3비트 항상 000 → 3비트 시프트로 실효 35비트(2^35=32GB) 표현 가능", "32비트 OS 한계", "GC 알고리즘 제약"], "ans": 1, "exp": "Java 객체 주소는 <strong>항상 8바이트 정렬</strong> → 하위 3비트는 항상 000. 저장 시 3비트 버리고 32비트로 저장, 복원 시 좌측 3비트 시프트 → 실효 35비트 = <strong>2^35 = 32GB</strong>. 32GB 초과 시 자동 OFF."}, {"q": "힙 32GB 경계에서의 실무 권장사항은?", "opts": ["32GB 정확히 설정", "32GB를 약간 넘겨 사용", "31GB 정도까지만 쓰는 게 32GB로 살짝 키우는 것보다 효율적인 구간이 있음", "Compressed OOPs 수동 비활성화"], "ans": 2, "exp": "힙 크기 32GB 초과 시 UseCompressedOops 자동 OFF → 64비트 주소 사용 → 객체 크기 증가 → GC 부담↑. <strong>31GB 정도까지만 쓰는 게 32GB로 살짝 키우는 것보다 효율적인 구간이 있다</strong>. MSA 환경에선 힙 32GB 넘기는 경우도 드물다."}, {"q": "UseCompressedClassPointers가 압축하는 대상은?", "opts": ["객체 → 객체 일반 참조 포인터", "객체 헤더의 클래스 포인터 (4B로 압축)", "JVM Heap 전체 포인터", "GC Root 포인터"], "ans": 1, "exp": "<strong>UseCompressedClassPointers: 객체 헤더 안의 클래스 포인터를 64비트 → 32비트(4B)로 압축</strong>. UseCompressedOops(일반 객체 참조)와 다름. JDK 25부터 deprecated, JDK 27에서 옵션 삭제(무조건 압축)."}, {"q": "UseCompressedOops와 UseCompressedClassPointers의 차이는?", "opts": ["동일한 옵션", "CompressedOops: 객체→객체 일반 참조 압축 / CompressedClassPointers: 객체 헤더의 클래스 포인터 압축", "CompressedOops는 Old 전용, ClassPointers는 Young 전용", "CompressedOops는 JDK 8, ClassPointers는 JDK 11부터"], "ans": 1, "exp": "<strong>UseCompressedOops</strong> = 일반 객체 참조 포인터 압축 (객체 → 객체). <strong>UseCompressedClassPointers</strong> = 객체 헤더 안의 클래스 메타데이터 포인터 압축. 서로 다른 대상을 압축하는 별개의 옵션."}, {"q": "UseCompressedClassPointers=true일 때 객체 헤더 크기는?", "opts": ["8B (Mark Word만)", "16B (Mark Word 8B + Class Ptr 8B)", "12B (Mark Word 8B + Class Ptr 4B)", "4B (Class Ptr만)"], "ans": 2, "exp": "UseCompressedClassPointers=true: <strong>Mark Word 8B + 압축 Class Pointer 4B = 12B</strong>. Uncompressed일 때는 16B. 배열이면 추가로 배열 길이 4B가 붙는다."}, {"q": "UseCompactObjectHeaders(JDK 25)의 핵심 변화는?", "opts": ["Young/Old 메모리 레이아웃 변경", "Mark Word + Class Pointer를 하나의 8바이트로 통합 → 헤더가 16B→8B로 감소", "Metaspace를 힙 안으로 이동", "GC 스레드 수 자동 최적화"], "ans": 1, "exp": "<strong>Mark Word + Class Pointer를 하나의 8바이트로 통합</strong>. 헤더 변천사: 16B(압축 없음) → 12B(CompressedClassPointers) → <strong>8B(CompactObjectHeaders)</strong>. 64비트 안에 22비트를 클래스 포인터로 사용 → 최대 400만 개 클래스 식별 가능."}, {"q": "UseCompactObjectHeaders를 켜야 하는 이유는?", "opts": ["필수 설정이라서", "단점 없고 throughput만 올라감 — 객체 크기↓ → GC 빈도↓, 캐시 히트율↑", "Metaspace 크기가 줄어들어서", "Full GC가 없어지기 때문"], "ans": 1, "exp": "<strong>단점 없고 throughput만 올라간다</strong>. 객체 크기↓ → 같은 힙에 더 많은 객체 → GC 빈도↓ → STW↓ + CPU 캐시에 더 많은 객체 → cache hit rate↑. JDK 25+이면 켜는 것을 추천. 디폴트가 OFF인 건 호환성 검증 단계."}, {"q": "MaxMetaspaceSize를 명시해야 하는 이유는?", "opts": ["디폴트가 너무 작아서", "디폴트가 무한대 — 메모리 릭 시 OOM Killer에 죽기 전까지 계속 증가, 명시하면 OOM 조기 발견", "성능 최적화를 위해", "JVM 안정성을 위해"], "ans": 1, "exp": "<strong>MaxMetaspaceSize 디폴트 = 무한대</strong>. 메모리 릭 발생 시 컨테이너 OOM Killer에 죽기 전까지 계속 증가. 명시적으로 잡아두면(예: 512M) OOM이 조기 발견됨 → 운영 전 단계에서 잡을 기회."}, {"q": "GC 로그에서 Metadata GC Threshold가 자주 나타나면?", "opts": ["Metaspace가 너무 커서", "MetaspaceSize(HWM 초기값) 디폴트가 너무 작아서 — 128MB 또는 256MB로 키우자", "힙 크기가 부족해서", "GC 스레드가 부족해서"], "ans": 1, "exp": "JVM 초반 GC 로그에 <strong>Metadata GC Threshold로 인한 GC가 자주 찍힘 → MetaspaceSize(HWM 초기값) 디폴트(16~21MB)가 너무 작은 것</strong>. -XX:MetaspaceSize=128M 또는 256M으로 키우자."}, {"q": "AOP를 많이 쓸 때 Metaspace 이슈가 발생하는 이유는?", "opts": ["AOP가 힙을 많이 사용해서", "AOP 프록시 클래스는 동적으로 ClassLoader가 생성·소멸됨 → 클래스 메타데이터가 Metaspace에 누적 → 임계치 도달 시 GC 폭주", "AOP가 GC를 직접 호출해서", "AOP 설정 파일이 Metaspace에 저장돼서"], "ans": 1, "exp": "<strong>AOP 프록시 클래스는 동적으로 ClassLoader가 생성·소멸</strong> → 클래스 메타데이터가 Metaspace에 누적 → 회수 3조건 만족 전까지 계속 점유 → HWM 도달 시 GC 폭주."}, {"q": "Metaspace 로그에서 used → capacity → committed → reserved 순으로 커지는데 GC 임박 신호는?", "opts": ["reserved가 capacity에 가까워질 때", "used가 committed에 가까워질 때", "capacity가 0이 될 때", "reserved가 무한대가 될 때"], "ans": 1, "exp": "<strong>used가 committed에 가까워지면 곧 GC 트리거</strong>. used(실제 사용) → capacity(청크화된 공간) → committed(OS에 요청한 공간) → reserved(가상 주소 예약) 순으로 크기가 커짐."}, {"q": "DisableExplicitGC 옵션이 필요한 이유는?", "opts": ["GC를 완전히 비활성화", "라이브러리 안에 박혀있는 System.gc() 호출을 막기 위해 — 내가 수정할 수 없는 코드", "힙 크기를 고정", "GC 스레드를 줄이기 위해"], "ans": 1, "exp": "<strong>라이브러리 안에 박혀있는 System.gc() 코드는 내가 못 고친다</strong>. 옵션으로 막아야 함. -XX:+DisableExplicitGC로 System.gc() 호출을 무력화."}, {"q": "'GC는 힙의 객체만 회수하는가?'에 대한 올바른 답은?", "opts": ["YES, GC는 오직 JVM 힙의 객체만 회수", "NO, JVM 힙 밖 Metaspace 영역의 클래스 메타데이터도 회수 대상 (단 3조건 AND 충족 시)", "YES, 힙 밖은 OS가 관리", "NO, GC는 힙을 전혀 수거하지 않음"], "ans": 1, "exp": "<strong>NO. GC는 JVM 힙의 객체뿐 아니라 Metaspace의 클래스 메타데이터도 회수 대상</strong>. 단 회수 조건이 까다로움: 클래스 인스턴스 unreachable + 직접 참조 0 + 로더 자체 unreachable 모두 AND로 충족해야 함."}];
+
+let qIdx=0,score=0,answered=false;
+function goTo(id){
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  const qs=document.getElementById('quiz-section');
+  if(id==='quiz'){
+    document.querySelectorAll('.section').forEach(s=>s.style.display='none');
+    qs.style.display='block'; quizStart();
+  } else {
+    qs.style.display='none';
+    document.querySelectorAll('.section').forEach(s=>s.style.display='');
+    const t=document.getElementById(id); if(t)t.classList.add('active');
+  }
+  document.querySelectorAll('.nav-item').forEach(n=>{
+    if((id==='quiz'&&n.textContent.includes('퀴즈'))||n.getAttribute('onclick')?.includes(id))n.classList.add('active');
+  });
+}
+function quizStart(){qIdx=0;score=0;answered=false;document.getElementById('quizMain').style.display='block';document.getElementById('quizResult').classList.remove('show');renderQ();}
+function renderQ(){
+  answered=false;
+  const q=questions[qIdx];
+  document.getElementById('qCount').textContent=`${qIdx+1} / ${questions.length}`;
+  document.getElementById('qProgressFill').style.width=`${(qIdx/questions.length)*100}%`;
+  document.getElementById('qText').textContent=q.q;
+  document.getElementById('qExplanation').className='quiz-explanation';
+  document.getElementById('qNextBtn').style.display='none';
+  const keys=['A','B','C','D'];
+  const c=document.getElementById('qOptions');c.innerHTML='';
+  q.opts.forEach((opt,i)=>{
+    const b=document.createElement('button');b.className='quiz-opt';
+    b.innerHTML=`<span class="opt-key">${keys[i]}</span>${opt}`;
+    b.onclick=()=>selectAnswer(i);c.appendChild(b);
+  });
+}
+function selectAnswer(i){
+  if(answered)return;answered=true;
+  const q=questions[qIdx];
+  const btns=document.querySelectorAll('.quiz-opt');
+  btns.forEach(b=>b.disabled=true);
+  if(i===q.ans){btns[i].classList.add('correct');score++;}
+  else{btns[i].classList.add('wrong');btns[q.ans].classList.add('correct');}
+  const exp=document.getElementById('qExplanation');exp.innerHTML=q.exp;exp.classList.add('show');
+  document.getElementById('qNextBtn').style.display='inline-block';
+  document.getElementById('qNextBtn').textContent=qIdx<questions.length-1?'다음 문제 →':'결과 보기 →';
+}
+function quizNext(){qIdx++;if(qIdx>=questions.length)showResult();else renderQ();}
+function showResult(){
+  document.getElementById('quizMain').style.display='none';
+  const pct=Math.round((score/questions.length)*100);
+  document.getElementById('quizScore').textContent=`${score} / ${questions.length}`;
+  let c='';
+  if(pct>=90)c='완벽합니다 🎉 다음 파트로!';
+  else if(pct>=70)c='잘 하셨어요 👍 틀린 챕터를 복습해보세요.';
+  else if(pct>=50)c='절반 통과 ✨ 핵심 챕터를 한 번 더 읽어보세요.';
+  else c='복습이 필요해요 📖 처음부터 다시 읽어보세요.';
+  document.getElementById('quizComment').textContent=`${pct}% 정답률 — ${c}`;
+  document.getElementById('quizResult').classList.add('show');
+}
+function quizRestart(){quizStart();}
+
+</script>
+</body>
+</html>
